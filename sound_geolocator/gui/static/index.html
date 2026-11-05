@@ -99,7 +99,7 @@
   </div>
   <div class="row" style="margin-top:8px">
     <button id="reSpec">Update spectrogram</button>
-    <div class="seg"><button id="vEnh" class="on">Enhanced</button><button id="vRaw">Raw</button></div>
+    <div class="seg"><button id="vEnh" class="on">Enhanced</button><button id="vClean" title="Steady lines removed: each frequency minus its 30 s running median. Hum, whines and other lines that sit still vanish, Doppler sweeps stay. Takes about a minute the first time.">Lines removed</button><button id="vRaw">Raw</button></div>
   </div>
 
   <h2><span class="n">2</span>Doppler curves</h2>
@@ -246,7 +246,9 @@
         <button id="tTrace" title="Click points along a line, Enter or double-click to digitise it; drag a box to auto-trace (T)">✎ Trace</button>
         <button id="tErase" title="Drag a box to remove points of the selected pass (E)">⌫ Erase</button>
       </div>
-      <label class="chk" style="margin:0" title="Half-width of the band around your guide points (empty = 4% of the frequency)">± Hz <input id="bandW" type="number" min="1" step="1" placeholder="auto"></label>
+      <label class="chk" style="margin:0" title="Isolate and fit: removes steady lines around the pass, traces the ridge between your clicks, then fits the flyover model and re-traces in ever narrower bands around the model curve. Two clicks (start and end of the pass) are often enough. Off: old method, strongest bin in a band around your clicks."><input id="isoOn" type="checkbox" checked> isolate + fit</label>
+      <label class="chk" style="margin:0" title="Isolate: lines that stay at one frequency longer than about half this many seconds are removed before tracing">⟷ s <input id="isoWin" type="number" min="8" step="2" value="30" style="width:46px"></label>
+      <label class="chk" style="margin:0" title="Old method only: half-width of the band around your guide points (empty = 4% of the frequency)">± Hz <input id="bandW" type="number" min="1" step="1" placeholder="auto"></label>
       <button id="fitSel" class="primary" title="Fit the flyover model to the selected pass (Enter)">Fit selected</button>
       <span class="sep"></span>
       <button id="zBack" title="Previous view (Backspace)">↶ Back</button>

@@ -19,8 +19,8 @@ from flask import Flask, jsonify, request, send_file, send_from_directory
 
 from ..audio import load_audio
 from ..doppler import fit_flyover
-from ..extract import (DopplerCurve, clean_curve, digitise_along, load_curves, save_curves, trace_from_seed,
-                       track_ridge)
+from ..extract import (DopplerCurve, clean_curve, digitise_along, isolate_curve, load_curves, save_curves,
+                       trace_from_seed, track_ridge)
 from ..flights import Track, fetch_opensky_states, load_tracks
 from ..spectrogram import compute_spectrogram, enhance
 
@@ -56,6 +56,7 @@ class State:
         self.result = None
         self.truth = None  # demo only
         self.clim = {}
+        self.clean = None
         self.progress = {"stage": "idle", "fraction": 0.0}
         self.dem_file = None
         self.version = 0  # bumped on every change of the curves, so other windows can follow
@@ -79,6 +80,7 @@ class State:
                                        progress=prog)
         self.progress = {"stage": "enhancing", "fraction": 0.65}
         self.spec = enhance(self.raw)
+        self.clean = None  # 'lines removed' view, made on first use
         # colour limits from the whole recording, so the view doesn't flicker when panning
         self.clim = {}
         for k, sp in (("enhanced", self.spec), ("raw", self.raw)):
@@ -88,6 +90,18 @@ class State:
 
 
 S = State()
+
+
+def _clean_spec():
+    """The spectrogram with lasting lines removed (30 s running median per frequency), made once."""
+    if S.clean is None:
+        S.progress = {"stage": "removing steady lines", "fraction": 0.3}
+        sp = enhance(S.raw, hum_window_s=30.0)
+        sub = sp.power_db[:, ::max(1, sp.power_db.shape[1] // 2000)]
+        S.clim["clean"] = (float(np.percentile(sub, 5)), float(np.percentile(sub, 99.7)))
+        S.clean = sp
+        S.progress = {"stage": "done", "fraction": 1.0}
+    return S.clean
 
 
 def _curve_json(cv: DopplerCurve, i: int):
@@ -266,7 +280,7 @@ def create_app():
         import matplotlib.pyplot as plt
 
         which = request.args.get("view", "enhanced")
-        sp = S.spec if which == "enhanced" else S.raw
+        sp = {"enhanced": S.spec, "raw": S.raw}.get(which) or _clean_spec()
         a = request.args
         t0, t1 = float(a.get("t0", sp.times[0])), float(a.get("t1", sp.times[-1]))
         f0, f1 = float(a.get("f0", sp.freqs[0])), float(a.get("f1", sp.freqs[-1]))
@@ -312,6 +326,15 @@ def create_app():
         d = request.get_json()
         name = d.get("name") or f"pass {len(S.curves) + 1}"
         rise = None if d.get("allow_rise") else 0.5
+        if d["mode"] == "guide" and d.get("isolate", True):
+            def prog(fr, stage):
+                S.progress = {"stage": stage, "fraction": round(fr, 3)}
+            cv = isolate_curve(S.raw, d["t"], d["f"], line_window_s=float(d.get("line_window") or 30.0),
+                               c=float(d.get("c") or 340.0), name=name, progress=prog)
+            with S.lock:
+                S.curves.append(cv)
+                _save_fits()
+            return jsonify(curves=_curves_payload())
         if d["mode"] == "guide":
             cv = digitise_along(S.spec, d["t"], d["f"], halfwidth_hz=float(d["width"]) if d.get("width") else None,
                                 name=name)

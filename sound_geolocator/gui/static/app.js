@@ -173,13 +173,15 @@ async function finishGuide() {
   const g = guide.filter((q, k) => k === 0 || Math.abs(q.t - guide[k - 1].t) > 1e-3 || Math.abs(q.f - guide[k - 1].f) > 1e-3);
   guide = []; draw();
   if (g.length < 2) { status('Click at least two points along the line', true); return; }
-  status('Digitising the line along your points…', false, true);
+  const iso = $('isoOn').checked;
+  status(iso ? 'Isolating the line: removing steady lines, tracing, fitting…' : 'Digitising the line along your points…', false, true);
   try {
     const w = +$('bandW').value;
-    const j = await post('/api/curves', { mode: 'guide', t: g.map((q) => q.t), f: g.map((q) => q.f), width: w > 0 ? w : null });
+    const j = await post('/api/curves', { mode: 'guide', t: g.map((q) => q.t), f: g.map((q) => q.f), width: w > 0 ? w : null, isolate: iso, line_window: +$('isoWin').value || 30, c: +$('c').value || 340 });
     sel = j.curves.length - 1; setCurves(j.curves);
     const c = curves[sel];
-    status(`${c.name}: ${c.n} points digitised. Check they sit on the line (Erase removes strays), then press Fit or Enter.`);
+    if (iso && c.fit) status(`${c.name}: ${c.n} points isolated and fitted: closest at ${fmtT(c.fit.t_cpa, 0.1)} ±${(c.fit.t_cpa_err || 0).toFixed(1)} s, ${c.fit.speed.toFixed(1)} ±${(c.fit.speed_err || 0).toFixed(1)} m/s, ${(c.fit.d_cpa / 1000).toFixed(2)} ±${((c.fit.d_cpa_err || 0) / 1000).toFixed(2)} km, tone ${c.fit.f0.toFixed(1)} Hz (rms ${c.fit.rms_hz} Hz). Check the green model sits on the line.`);
+    else status(`${c.name}: ${c.n} points digitised. Check they sit on the line (Erase removes strays), then press Fit or Enter.`);
   } catch (err) { status(err.message, true); }
 }
 async function fitCurve(i) {
@@ -358,8 +360,15 @@ $('reSpec').onclick = async () => {
   status('Recomputing spectrogram…', false, true); const stop = pollProgress('Recomputing');
   try { const j = await post('/api/params', { fmin: +$('fmin').value, fmax: +$('fmax').value, window: +$('win').value, hop: Math.min(0.25, +$('win').value / 4) }); stop(); await setSpec(j.spec, true); status('Updated'); } catch (err) { stop(); status(err.message, true); }
 };
-$('vEnh').onclick = () => { viewMode = 'enhanced'; $('vEnh').classList.add('on'); $('vRaw').classList.remove('on'); if (spec) loadImage(); };
-$('vRaw').onclick = () => { viewMode = 'raw'; $('vRaw').classList.add('on'); $('vEnh').classList.remove('on'); if (spec) loadImage(); };
+function setViewMode(m) {
+  viewMode = m; [['vEnh', 'enhanced'], ['vClean', 'clean'], ['vRaw', 'raw']].forEach(([id, k]) => $(id).classList.toggle('on', k === m));
+  if (!spec) return;
+  if (m === 'clean') { status('Removing steady lines (about a minute the first time)…', false, true); loadImage().then(() => status('Lines removed: each frequency minus its 30 s running median')); }
+  else loadImage();
+}
+$('vEnh').onclick = () => setViewMode('enhanced');
+$('vClean').onclick = () => setViewMode('clean');
+$('vRaw').onclick = () => setViewMode('raw');
 $('curvesFile').onchange = async (e) => { try { const j = await upload('/api/curves/import', e.target.files[0]); setCurves(j.curves); } catch (err) { status(err.message, true); } e.target.value = ''; };
 $('tracksFile').onchange = async (e) => {
   status('Loading flights…', false, true);
@@ -718,7 +727,7 @@ const MODEL = [
   ['h3', '5. Digitising and fitting'],
   ['p', 'Your guide clicks $(t_i, g_i)$ are joined by a monotone spline $g(t)$. In every spectrogram frame only the band $|f - g(t)| \\le w$ is searched ($w$ = the ± Hz box, or 4 % of the frequency), the strongest bin is taken and refined by a parabola through its neighbours:'],
   ['d', '\\hat f_j = f_{b} + \\frac{\\Delta f}{2}\\,\\frac{S_{b-1} - S_{b+1}}{S_{b-1} - 2S_b + S_{b+1}}'],
-  ['p', 'Weak peaks, peaks on the band edge, and points more than 2 Hz off a running median are dropped. Then the four parameters are found by robust non-linear least squares (soft-L1 loss, so a few stray points barely matter), started from several distances to avoid a wrong local minimum:'],
+  ['p', 'Weak peaks, peaks on the band edge, and points more than 2 Hz off a running median are dropped. That is the plain method (\u201cisolate + fit\u201d off). With \u201cisolate + fit\u201d on (the default), the line is first isolated from the noise: (1) around the pass, each frequency row of the raw spectrogram has its running median over $W$ = 30 s subtracted, so any line that sits still for more than about $W/2$ (hum, a whine, an idling engine) vanishes while the sweep, which crosses each bin quickly, stays (the \u201cLines removed\u201d view shows this); (2) the smoothest falling ridge is traced (dynamic programming that penalises changes of slope) inside the band spanned by neighbouring clicks; (3) the flyover model below is fitted to that ridge, and the ridge is traced again inside ever narrower bands around the model curve (6, 4, 2.5, 1.5 % of $f$), refitting each time, so the model carries the trace across faint stretches and crossing lines; (4) points more than 3 robust σ off the model are dropped and the final fit is made. Then the four parameters are found by robust non-linear least squares (soft-L1 loss, so a few stray points barely matter), started from several distances to avoid a wrong local minimum:'],
   ['d', '\\min_{f_0,\\,t_\\mathrm{cpa},\\,v,\\,d}\\ \\sum_j \\big(\\hat f_j - f(t_j;\\,f_0, t_\\mathrm{cpa}, v, d)\\big)^2'],
   ['p', 'The rms residual (Hz) says how well a straight flyover explains the points. A turning or climbing aircraft fits worse.'],
   ['p', 'Error bars (±, one sigma) come from the curvature of the misfit at the best fit: with $J$ the Jacobian of the model at the fitted parameters and $s^2$ the residual variance,'],

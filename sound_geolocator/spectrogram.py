@@ -78,21 +78,23 @@ def enhance(spec: Spectrogram, hum_window_s: float | None = None, whiten_hz: flo
     """Return an enhanced copy where tonal lines read as positive dB above local background.
 
     1. Remove stationary components: subtract each frequency row's median
-       over time (or over a sliding window of ``hum_window_s`` seconds).
+       over time, or over a sliding window of ``hum_window_s`` seconds. The
+       sliding version also removes lines that last only minutes (a passing
+       car's whine, an engine left idling), which the whole-recording median
+       keeps; 30 s suits aircraft sweeps.
     2. Whiten: subtract a running median across frequency in each frame,
        which flattens broadband engine/wind noise and leaves narrow lines.
     3. Despeckle with a small median filter (freq bins x time frames).
     4. Clip below ``floor_db``.
     """
-    p = spec.power_db.copy()
+    p = spec.power_db.astype(np.float32)
     dt = np.median(np.diff(spec.times)) if len(spec.times) > 1 else 1.0
     df = np.median(np.diff(spec.freqs)) if len(spec.freqs) > 1 else 1.0
 
     if hum_window_s is None:
         p -= np.median(p, axis=1, keepdims=True)
     else:
-        w = max(3, int(round(hum_window_s / dt)) | 1)
-        p -= median_filter(p, size=(1, w), mode="nearest")
+        p -= sliding_row_median(p, dt, hum_window_s)
 
     wf = max(3, int(round(whiten_hz / df)) | 1)
     p -= median_filter(p, size=(wf, 1), mode="nearest")
@@ -101,6 +103,31 @@ def enhance(spec: Spectrogram, hum_window_s: float | None = None, whiten_hz: flo
         p = median_filter(p, size=despeckle, mode="nearest")
     p = np.maximum(p, floor_db)
     return Spectrogram(spec.times, spec.freqs, p)
+
+
+def sliding_row_median(p: np.ndarray, dt: float, window_s: float, block_s: float = 2.0) -> np.ndarray:
+    """Running median of every frequency row over ``window_s`` seconds (approximate, fast).
+
+    Each row is first reduced to medians of short blocks (``block_s``), then a
+    running median over the blocks spanning ``window_s`` is taken and
+    interpolated back to every frame. A tone that stays in one bin longer than
+    about half the window (hum, a whine, a parked engine) is removed; a Doppler
+    sweep that crosses the bin in less time is kept.
+    """
+    F, T = p.shape
+    nb = max(1, int(round(block_s / dt)))
+    w = max(3, int(round(window_s / (nb * dt))) | 1)
+    nblk = int(np.ceil(T / nb))
+    if nblk < 3:
+        return np.median(p, axis=1, keepdims=True) * np.ones((1, T), np.float32)
+    pad = nblk * nb - T
+    q = np.concatenate([p, p[:, -1:].repeat(pad, 1)], 1) if pad else p
+    blk = np.median(q.reshape(F, nblk, nb), axis=2)
+    run = median_filter(blk, size=(1, min(w, nblk | 1)), mode="nearest")
+    tb = (np.arange(nblk) + 0.5) * nb - 0.5  # block centres, in frames
+    j = np.clip(np.searchsorted(tb, np.arange(T)) - 1, 0, nblk - 2)
+    fr = np.clip((np.arange(T) - tb[j]) / nb, 0.0, 1.0).astype(np.float32)
+    return run[:, j] * (1 - fr) + run[:, j + 1] * fr
 
 
 def smooth_time(spec: Spectrogram, seconds: float) -> Spectrogram:

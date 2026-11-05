@@ -39,7 +39,14 @@ From a terminal:
 sgeo gui        # opens http://127.0.0.1:8765
 ```
 
-Open a recording and zoom into a pass. With **✎ Trace**, click a few points roughly along the falling line and press Enter: only a narrow band around your points is digitised, so the trace can't jump to other lines. Check the dots, remove strays with **⌫ Erase**, then **Fit**. **⧉ New window** opens the current view (or one pass) in its own window, and all windows stay in sync. **∑ Model** explains the equations.
+Open a recording and zoom into a pass. With **✎ Trace**, click a few points roughly along the falling line (two, at the start and end of the pass, are often enough) and press Enter. With **isolate + fit** on (the default) the pass is isolated from the noise and fitted in one go:
+
+1. around the pass, every frequency has its 30 s running median removed (**⟷ s** sets the window), so hum, whines and any line that sits still vanish while the sweep stays; the **Lines removed** view shows the whole recording this way;
+2. the smoothest falling ridge is traced between your clicks;
+3. the flyover model is fitted and the ridge is traced again in ever narrower bands around the model curve (6 → 1.5 % of the frequency), refitting each time, so the trace can't step onto a crossing or horizontal line;
+4. points more than 3 robust σ off the model are dropped and the final fit, with error bars, is made.
+
+Check that the green model sits on the line; remove strays with **⌫ Erase** and **Fit** again if needed. With isolate + fit off, the old method is used (strongest bin in a ± Hz band around your clicks, then **Fit**). **⧉ New window** opens the current view (or one pass) in its own window, and all windows stay in sync. **∑ Model** explains the equations.
 
 Then load flights (a whole-day archive, see below, or a CSV), click the map to set the search centre and press **Find location**, or press **Search worldwide** to search the whole day without assuming a place. Flight tracks can be switched on and off per aircraft type in the map's layer box. The demo button loads a synthetic case with a known answer. Everything runs locally, and the map tiles are the only thing loaded from the internet.
 
@@ -123,7 +130,7 @@ Use tracks covering a few minutes before and after the recording. The sound hear
 |---|---|
 | `audio.py` | load audio/video, resample |
 | `spectrogram.py` | STFT, hum removal, whitening, despeckling |
-| `extract.py` | digitising along a guide, ridge tracking (box or seed), curve cleaning, JSON I/O |
+| `extract.py` | isolating and fitting a pass from a few clicks (`isolate_curve`), digitising along a guide, ridge tracking (box or seed), curve cleaning, JSON I/O |
 | `doppler.py` | retarded-time Doppler simulation, straight-flyover fit |
 | `flights.py` | track model (smoothing spline in ECEF), CSV/OpenSky/readsb loaders |
 | `adsb_day.py` | whole-day worldwide archive: conversion, area queries, worldwide search |

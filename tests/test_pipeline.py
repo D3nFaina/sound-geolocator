@@ -232,3 +232,22 @@ def test_predicted_flight_curves_match_passes():
     by = {o["ident"]: o for o in out}
     assert "0f0f0f" not in by  # the far-away distractor is not drawn
     assert by["a1b2c3"]["match"] == "A" and by["a1b2c3"]["rms_hz"] < 1.5
+
+
+def test_isolate_curve_ignores_steady_lines():
+    """A faint sweep crossed by strong steady tones: two clicks are enough to isolate and fit it."""
+    from sound_geolocator.extract import isolate_curve
+
+    sr, dur = 2000, 300.0
+    rng = np.random.default_rng(3)
+    t = np.arange(int(sr * dur)) / sr
+    f_inst = 150 * straight_flyover_ratio(t, 150.0, 130.0, 2500.0)
+    x = 0.3 * np.sin(2 * np.pi * np.cumsum(f_inst) / sr)
+    for f_hum in (120.0, 147.0, 172.0):  # steady lines the sweep crosses, stronger than it
+        x += 1.0 * np.sin(2 * np.pi * f_hum * t)
+    x += 0.04 * rng.normal(0, 1, t.size) * np.sqrt(sr)
+    raw = compute_spectrogram(x, sr, window_s=1.0, hop_s=0.25, fmax=400)
+    cv = isolate_curve(raw, [80, 225], [f_inst[80 * sr], f_inst[225 * sr]])
+    p = cv.meta["fit"]
+    assert cv.meta["points"] > 300
+    assert abs(p["t_cpa"] - 150) < 1 and abs(p["speed"] - 130) < 5 and abs(p["d_cpa"] - 2500) / 2500 < 0.1

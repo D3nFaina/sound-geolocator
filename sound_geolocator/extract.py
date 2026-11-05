@@ -288,3 +288,143 @@ def digitise_along(spec: Spectrogram, guide_t, guide_f, halfwidth_hz: float | No
                       {"guide_t": [float(x) for x in gt], "guide_f": [float(x) for x in gf],
                        "halfwidth_hz": halfwidth_hz, "rel_width": rel_width, "method": "guide"})
     return clean_curve(cv, max_dev_hz=clean_hz) if clean_hz else cv
+
+
+def _corridor_peaks(S, freqs, centre, hw, min_strength_db):
+    """Strongest bin per frame inside centre±hw, refined; NaN where weak or on the edge."""
+    df = float(np.median(np.diff(freqs)))
+    f = np.full(S.shape[1], np.nan)
+    st = np.full(S.shape[1], np.nan)
+    for j in range(S.shape[1]):
+        lo = int(np.searchsorted(freqs, centre[j] - hw[j]))
+        hi = int(np.searchsorted(freqs, centre[j] + hw[j], side="right"))
+        if hi - lo < 3:
+            continue
+        col = S[lo:hi, j]
+        b = int(np.argmax(col))
+        st[j] = col[b]
+        if b == 0 or b == len(col) - 1 or col[b] < min_strength_db:
+            continue
+        y0, y1, y2 = col[b - 1], col[b], col[b + 1]
+        den = y0 - 2 * y1 + y2
+        delta = 0.5 * (y0 - y2) / den if den < 0 else 0.0
+        f[j] = freqs[lo + b] + np.clip(delta, -0.5, 0.5) * df
+    return f, st
+
+
+def isolate_curve(raw: Spectrogram, guide_t, guide_f, line_window_s: float = 30.0, corridor_rel: float = 0.08,
+                  min_strength_db: float = 3.0, max_slope_hz_s: float | None = None, curv_penalty_db: float = 4.0,
+                  c: float | None = None, name: str = "", progress=None, debug=False) -> DopplerCurve:
+    """Isolate one Doppler pass from a noisy spectrogram and fit it, from a few rough clicks.
+
+    This is the procedure used by hand on the real recording, automated:
+
+    1. Clean a local piece of the *raw* spectrogram (guide span ± ``line_window_s``,
+       guide band ± 30 %): subtract each frequency row's running median over
+       ``line_window_s`` seconds. Hum, whines and any tone that sits still for
+       more than about half that long vanish, while the sweep, which crosses
+       each bin quickly, stays. Then whiten across frequency and despeckle.
+    2. Trace the smoothest ridge (curvature-penalised Viterbi, falling pitch
+       only) inside a wide corridor: between two neighbouring clicks, every
+       frequency from the lower click to the higher one, plus a margin of
+       ``corridor_rel`` × f (at least 4 Hz). So two clicks, at the start and
+       the end of the pass, are enough when the line is clear.
+    3. Fit the straight-flyover Doppler model to that trace (robust loss), and
+       use the model curve, not the clicks, as the centre of ever narrower
+       corridors (6 %, 4 %, 2.5 %, 1.5 % of f; at least 4, 3, 2, 1.2 Hz). In
+       each, trace the ridge again inside the corridor and refit. The model bridges places where the
+       line is faint or crossed by another line, so the trace can't step
+       onto a horizontal line any more.
+    4. Drop points more than 3 robust sigmas off the final model and fit
+       again, with error bars.
+
+    Returns the curve on the frame grid between the first and last click
+    (NaN where nothing reliable was found) with the fit in ``meta["fit"]``.
+    """
+    from .doppler import DEFAULT_SPEED_OF_SOUND, fit_flyover, straight_flyover_ratio
+    from .spectrogram import enhance
+
+    c = DEFAULT_SPEED_OF_SOUND if c is None else c
+    gt = np.asarray(guide_t, float)
+    gf = np.asarray(guide_f, float)
+    o = np.argsort(gt)
+    gt, gf = gt[o], gf[o]
+    keep = np.concatenate([[True], np.diff(gt) > 1e-6])
+    gt, gf = gt[keep], gf[keep]
+    if len(gt) < 2:
+        raise ValueError("click at least two points along the line")
+    say = progress or (lambda *_: None)
+
+    say(0.05, "cleaning the spectrogram")
+    fmin, fmax = gf.min() / 1.3, gf.max() * 1.3
+    loc = raw.band(fmin, fmax).window(gt[0] - line_window_s, gt[-1] + line_window_s)
+    loc = enhance(Spectrogram(loc.times, loc.freqs, loc.power_db.astype(np.float32)),
+                  hum_window_s=line_window_s, whiten_hz=min(40.0, 0.5 * (fmax - fmin)))
+    sub = loc.window(gt[0], gt[-1])
+    times, freqs, S = sub.times, sub.freqs, np.asarray(sub.power_db, float)
+    if len(times) < 8:
+        raise ValueError("the guide is too short")
+    df = float(np.median(np.diff(freqs)))
+    hop = float(np.median(np.diff(times)))
+    fine_df = min(df, hop)  # one fine bin per frame == 1 Hz/s
+    fine = np.arange(freqs[0], freqs[-1] + 1e-9, fine_df)
+    E0 = np.empty((fine.size, len(times)))
+    for j in range(len(times)):
+        E0[:, j] = np.interp(fine, freqs, S[:, j])
+    E0 = np.minimum(E0, 12.0)  # every clearly visible line is worth the same
+    if max_slope_hz_s is None:  # steepest click-to-click slope, with room to spare
+        max_slope_hz_s = max(8.0, 1.5 * float(np.max(np.abs(np.diff(gf) / np.diff(gt)))))
+    K = max(1, int(np.ceil(max_slope_hz_s * hop / fine_df)))
+    if fine.size * len(times) * (2 * K + 1) > 4e8:
+        raise ValueError("pass too long or too wide to trace at once: click the start and end closer")
+    pen = curv_penalty_db * (fine_df / hop)
+    rise = 0  # a straight pass only ever falls in pitch
+
+    def ridge(lo_f, hi_f):
+        """Smoothest falling ridge inside [lo_f, hi_f] per frame, then the refined peak next to it."""
+        E = E0.copy()
+        E[(fine[:, None] < lo_f[None, :]) | (fine[:, None] > hi_f[None, :])] = -20.0
+        path = fine[_viterbi_slope(E, K, pen, None, rise)]
+        f, st = _corridor_peaks(S, freqs, path, np.full(len(times), 1.5 * df), min_strength_db)
+        f[(f < lo_f) | (f > hi_f)] = np.nan
+        return f, st
+
+    def fit(ff):
+        ok = np.isfinite(ff)
+        if ok.sum() < 8:
+            raise ValueError("the line is too faint here to fit: add clicks or widen the guide")
+        return fit_flyover(times[ok], ff[ok], c)
+
+    def model(p):
+        return p["f0"] * straight_flyover_ratio(times, p["t_cpa"], p["speed"], p["d_cpa"], c)
+
+    # 2. wide corridor: between neighbouring clicks, from the lower to the higher one, plus a margin
+    say(0.2, "tracing the ridge")
+    k = np.clip(np.searchsorted(gt, times) - 1, 0, len(gt) - 2)
+    lo_f, hi_f = np.minimum(gf[k], gf[k + 1]), np.maximum(gf[k], gf[k + 1])
+    lo_f = lo_f - np.maximum(corridor_rel * lo_f, 4.0)
+    hi_f = hi_f + np.maximum(corridor_rel * hi_f, 4.0)
+    f, st = ridge(lo_f, hi_f)
+    p = fit(f)
+    stages = [f]
+    # 3. corridors around the model, wide first (to recover stretches the first trace missed), then narrow
+    for k, (rel, floor) in enumerate(((0.06, 4.0), (0.04, 3.0), (0.025, 2.0), (0.015, 1.2))):
+        say(0.35 + 0.15 * k, f"refining ({k + 1}/4)")
+        m = model(p)
+        hw = np.maximum(rel * m, floor)
+        f, st = ridge(m - hw, m + hw)
+        p = fit(f)
+        stages.append(f)
+    # 4. outliers
+    r = f - model(p)
+    sig = max(1.4826 * np.nanmedian(np.abs(r)), 0.3)
+    f[np.abs(r) > 3 * sig] = np.nan
+    p = fit(f)
+    say(1.0, "done")
+    meta = {"guide_t": [float(x) for x in gt], "guide_f": [float(x) for x in gf], "method": "isolate",
+            "line_window_s": line_window_s, "fit": {k: float(v) for k, v in p.items()}, "fitted": True,
+            "points": int(np.isfinite(f).sum())}
+    cv = DopplerCurve(times.copy(), f, st, name, meta)
+    if debug:
+        return cv, stages, Spectrogram(times, freqs, S)
+    return cv
