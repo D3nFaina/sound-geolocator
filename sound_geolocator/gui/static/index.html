@@ -61,6 +61,7 @@
   .ov { border:1px solid var(--line); border-radius:6px; padding:6px 8px; margin-top:6px; font-size:12px; display:grid; grid-template-columns:auto auto 1fr auto; gap:6px; align-items:start; }
   .ov .m { color:var(--muted); }
   .mini { padding:1px 7px; font-size:11px; margin-left:4px; }
+  .wc.sel { border-color:#80ed99; }
   .wc { border:1px solid var(--line); border-radius:6px; padding:6px 8px; margin-top:6px; font-size:12px; cursor:pointer; }
   .wc:hover { border-color:var(--accent); }
   #readout { position:absolute; right:10px; top:52px; background:#000a; padding:3px 8px; border-radius:4px; font:12px ui-monospace, monospace; pointer-events:none; }
@@ -190,6 +191,12 @@
   </div>
   <button id="areaBtn" style="width:100%;margin-top:6px" title="Needs the whole-day archive (step 3) and at least two fitted, ticked passes">Find places that hear the passes</button>
   <div id="areaRes" class="sub"></div>
+  <button id="rankBtn" style="width:100%;margin-top:6px" title="For every place found above: simulate the matched aircraft's Doppler curves and fit each pass">Simulate and rank the places (fit per pass)</button>
+  <div id="rankBox" style="display:none;margin-top:6px">
+    <canvas id="rankPlot" width="300" height="300" style="width:100%;background:#0d0f13;border:1px solid var(--line);border-radius:6px;cursor:crosshair"></canvas>
+    <div class="sub" id="rankInfo"></div>
+    <div id="rankList"></div>
+  </div>
   <h2><span class="n">5</span>Candidates on the sound map</h2>
   <p class="sub">Draw the predicted Doppler lines of the real flights for a place and start time on top of the spectrogram, to check them against what you hear. Use the search centre and start time above, or the <b>on spectrogram</b> buttons of a result. Each flight's tone is set from the pass it overlaps best.</p>
   <button id="predictHere" style="width:100%">Show flights at the search centre</button>

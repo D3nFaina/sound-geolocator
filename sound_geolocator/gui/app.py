@@ -62,6 +62,7 @@ class State:
         self.day = None  # DayArchive
         self.day_build = None  # (path, subprocess) while converting
         self.overlays = {}  # key -> predicted flight curves for one place and start time
+        self.area = None  # (candidates, curves) of the last 'places that hear the passes' search
 
     def compute_spec(self):
         p = self.params
@@ -617,6 +618,7 @@ def create_app():
 
                 ok = S.day.silence_ok(cands, w0, w1, radius, cell_km=2.0, progress=prog_s)
                 cands = [c for c, o in zip(cands, ok) if o]
+        S.area = (cands, curves)
         # one point per 2 km cell, with the range of start times that work there
         cells = {}
         for c in cands:
@@ -630,6 +632,37 @@ def create_app():
         S.progress = {"stage": "done", "fraction": 1.0}
         return jsonify(n_all=n_all, n_quiet=len(cands), gaps=gaps, passes=passes, points=pts[:40000],
                        truncated=len(pts) > 40000)
+
+    @app.post("/api/day/rank")
+    def day_rank():
+        """Simulate each candidate's aircraft and fit the passes: misfit per pass, for the B-vs-C plot."""
+        from ..rank import rank_candidates
+
+        if not S.area or not S.area[0]:
+            raise ValueError("run 'Find places that hear the passes' first")
+        cands, curves = S.area
+        S.progress = {"stage": "simulating Doppler curves", "fraction": 0.0}
+
+        def prog(fr):
+            S.progress = {"stage": "ground heights" if fr < 0.1 else "simulating Doppler curves",
+                          "fraction": round(fr, 3)}
+
+        rk = rank_candidates(S.day, cands, curves, c=float(request.get_json().get("c", 340)), progress=prog)
+        S.progress = {"stage": "done", "fraction": 1.0}
+        rms = rk["rms"]
+        ok = np.all(np.isfinite(rms), 1)
+        order = np.argsort(np.where(ok, np.sqrt(np.mean(rms ** 2, 1)), np.inf))
+        pts = []
+        for i in order[:int(request.get_json().get("max_points", 60000))]:
+            if not ok[i]:
+                break
+            cd = cands[i]
+            pts.append({"lat": round(float(rk["lat"][i]), 5), "lon": round(float(rk["lon"][i]), 5),
+                        "t_start": float(rk["t_start"][i]), "t_start_iso": _iso(float(rk["t_start"][i])),
+                        "rms": [round(float(v), 3) for v in rms[i]], "f0": [round(float(v), 2) for v in rk["f0"][i]],
+                        "h": round(float(rk["h"][i])), "ground": round(float(rk["ground"][i])),
+                        "aircraft": cd.aircraft})
+        return jsonify(passes=[c.name for c in curves], n=len(cands), points=pts)
 
     @app.post("/api/tracks/opensky")
     def opensky():

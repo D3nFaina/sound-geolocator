@@ -310,8 +310,8 @@ layers['Satellite (Esri)'].addTo(map);
 // flights per aircraft type, each a map overlay that can be switched on and off
 const CAT = { prop: ['Flights: propeller', '#80ed99'], jet: ['Flights: jet', '#c0c6d0'], heli: ['Flights: helicopter', '#ffd166'], unknown: ['Flights: unknown type', '#8a93a3'] };
 const trackLayers = Object.fromEntries(Object.keys(CAT).map((k) => [k, L.layerGroup().addTo(map)]));
-const resultLayer = L.layerGroup().addTo(map), worldLayer = L.layerGroup().addTo(map), areaLayer = L.layerGroup().addTo(map);
-const mapOverlays = { ...Object.fromEntries(Object.entries(CAT).map(([k, [name, col]]) => [`<span style="color:${col}">━</span> ${name}`, trackLayers[k]])), 'Location result': resultLayer, 'Worldwide candidates': worldLayer, 'Places that hear the passes': areaLayer };
+const resultLayer = L.layerGroup().addTo(map), worldLayer = L.layerGroup().addTo(map), areaLayer = L.layerGroup().addTo(map), rankLayer = L.layerGroup().addTo(map);
+const mapOverlays = { ...Object.fromEntries(Object.entries(CAT).map(([k, [name, col]]) => [`<span style="color:${col}">━</span> ${name}`, trackLayers[k]])), 'Location result': resultLayer, 'Worldwide candidates': worldLayer, 'Places that hear the passes': areaLayer, 'Ranked places (top 10)': rankLayer };
 L.control.layers(layers, mapOverlays, { position: 'topright', collapsed: false }).addTo(map);
 L.control.scale({ imperial: false }).addTo(map);
 let centerMarker = null, searchBox = null;
@@ -534,6 +534,56 @@ function showArea(j) {
   map.fitBounds(L.latLngBounds(pts.map((p) => [p.lat, p.lon])).pad(0.1));
   status(`${pts.length} places`);
 }
+// ---------------------------------------------------------------- simulate and rank: misfit on pass 1 vs pass 2
+let RANK = null, rankSel = -1;
+$('rankBtn').onclick = async () => {
+  const btn = $('rankBtn'); btn.disabled = true; status('Simulating the aircraft\'s Doppler curves at every place…', false, true); const stop = pollProgress('Ranking');
+  try { RANK = await post('/api/day/rank', { c: +$('c').value }); stop(); rankSel = RANK.points.length ? 0 : -1; showRank(); status(`${RANK.points.length} places ranked`); }
+  catch (err) { stop(); status(err.message, true); }
+  btn.disabled = false;
+};
+function rankAxes() {
+  const cv = $('rankPlot'), W = cv.width, H = cv.height, P = { l: 40, r: 8, t: 8, b: 32 };
+  const lo = Math.log10(0.2), hi = Math.log10(30);
+  const X = (v) => P.l + (Math.log10(Math.min(Math.max(v, 0.2), 30)) - lo) / (hi - lo) * (W - P.l - P.r);
+  const Y = (v) => H - P.b - (Math.log10(Math.min(Math.max(v, 0.2), 30)) - lo) / (hi - lo) * (H - P.t - P.b);
+  return { cv, W, H, P, X, Y };
+}
+function showRank() {
+  $('rankBox').style.display = ''; rankLayer.clearLayers();
+  const { cv, W, H, P, X, Y } = rankAxes(), g = cv.getContext('2d'), pts = RANK.points, [na, nb] = RANK.passes;
+  g.clearRect(0, 0, W, H); g.font = '10px sans-serif'; g.fillStyle = '#8a93a3'; g.strokeStyle = '#2a2f3a';
+  for (const v of [0.3, 0.5, 1, 2, 5, 10, 20]) {
+    g.beginPath(); g.moveTo(X(v), P.t); g.lineTo(X(v), H - P.b); g.moveTo(P.l, Y(v)); g.lineTo(W - P.r, Y(v)); g.stroke();
+    g.fillText(v, X(v) - 6, H - P.b + 12); g.fillText(v, 18, Y(v) + 3);
+  }
+  g.fillText(`rms misfit on ${na} (Hz)`, W / 2 - 50, H - 4);
+  g.save(); g.translate(10, H / 2 + 40); g.rotate(-Math.PI / 2); g.fillText(`rms on ${nb} (Hz)`, 0, 0); g.restore();
+  const t0 = Math.min(...pts.map((p) => p.t_start)), t1 = Math.max(...pts.map((p) => p.t_start)), span = Math.max(t1 - t0, 1);
+  for (let i = pts.length - 1; i >= 0; i--) { const p = pts[i]; g.fillStyle = timeColor((p.t_start - t0) / span); g.fillRect(X(p.rms[0]) - 1, Y(p.rms[1]) - 1, 2, 2); }
+  if (rankSel >= 0) { const p = pts[rankSel]; g.strokeStyle = '#fff'; g.lineWidth = 2; g.beginPath(); g.arc(X(p.rms[0]), Y(p.rms[1]), 6, 0, 7); g.stroke(); g.lineWidth = 1; }
+  $('rankInfo').innerHTML = `${pts.length.toLocaleString()} places of ${RANK.n.toLocaleString()}; both axes log; colour = start time. Click the plot to pick a place.`;
+  const box = $('rankList'); box.innerHTML = '';
+  pts.slice(0, 10).forEach((p, k) => {
+    const div = document.createElement('div'); div.className = 'wc' + (k === rankSel ? ' sel' : '');
+    div.innerHTML = `<b>#${k + 1}</b> ${na} ${p.rms[0].toFixed(2)} Hz · ${nb} ${p.rms[1].toFixed(2)} Hz<br><span class="meta">${p.lat.toFixed(4)}, ${p.lon.toFixed(4)} · start ${p.t_start_iso.slice(11, 19)} UTC · ${p.aircraft.join(' / ')} · <a href="${gmaps(p.lat, p.lon)}" target="_blank">Google Maps</a></span>`;
+    div.onclick = (e) => { if (e.target.tagName !== 'A') pickRank(k); };
+    box.appendChild(div);
+  });
+  pts.slice(0, 10).forEach((p, k) => L.circleMarker([p.lat, p.lon], { radius: k ? 6 : 9, color: k ? '#f8961e' : '#80ed99', weight: 2 }).bindTooltip(`rank #${k + 1}`).on('click', () => pickRank(k)).addTo(rankLayer));
+}
+function pickRank(k) {
+  rankSel = k; const p = RANK.points[k]; showRank();
+  setCenter(p.lat, p.lon); $('start').value = p.t_start_iso; $('alt').value = p.h; map.setView([p.lat, p.lon], 12);
+  predictAt(p.lat, p.lon, p.t_start_iso, `rank #${k + 1}`);
+}
+$('rankPlot').onclick = (e) => {
+  if (!RANK) return; const { cv, X, Y } = rankAxes(), r = cv.getBoundingClientRect();
+  const mx = (e.clientX - r.left) * cv.width / r.width, my = (e.clientY - r.top) * cv.height / r.height;
+  let best = -1, bd = 64;
+  RANK.points.forEach((p, i) => { const d = (X(p.rms[0]) - mx) ** 2 + (Y(p.rms[1]) - my) ** 2; if (d < bd) { bd = d; best = i; } });
+  if (best >= 0) pickRank(best);
+};
 // remember the paths typed last time
 for (const id of ['path', 'histPath', 'dayPath']) { const v = localStorage.getItem(id); if (v && !$(id).value) $(id).value = v; $(id).addEventListener('change', () => localStorage.setItem(id, $(id).value)); }
 

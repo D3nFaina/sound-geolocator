@@ -182,6 +182,26 @@ def test_day_archive_and_world_search(tmp_path):
     R = {"prop": 5000, "jet": 7000, "heli": 5000, "unknown": 6000}
     assert not day.silence_ok([best], 90, 110, R)[0]
     assert day.silence_ok([best], 300, 360, {"prop": 1500, "jet": 1500, "heli": 1500, "unknown": 1500})[0]
+    # simulate the voting aircraft's Doppler curves at each candidate and fit them
+    from sound_geolocator.doppler import doppler_ratio
+    from sound_geolocator.extract import DopplerCurve
+    from sound_geolocator.geo import lla_to_ecef
+    from sound_geolocator.rank import rank_candidates
+
+    O = lla_to_ecef(*truth)
+    curves = []
+    for fl, f0, (t_a, t_b) in zip(flights[:2], (90.0, 120.0), ((60, 140), (160, 240))):
+        tr = np.arange(t_a, t_b, 0.5)
+        curves.append(DopplerCurve(t=tr, f=f0 * doppler_ratio(fl, O, t0 + tr, c), name=fl.ident))
+    top = [w for w in day.search_world(passes, recording_s=360, n_best=None, cell_km=2.0)
+           if w.aircraft == ["a1b2c3", "d4e5f6"]]
+    assert top
+    rk = rank_candidates(day, top, curves, ground_m=np.full(len(top), truth[2]), c=c)
+    i = int(np.argmin(np.sum(rk["rms"] ** 2, 1)))
+    assert rk["rms"][i].max() < 0.1
+    assert haversine_m(rk["lat"][i], rk["lon"][i], truth[0], truth[1]) < 100
+    assert abs(rk["t_start"][i] - t0) < 1
+    assert abs(rk["f0"][i, 0] - 90) < 0.5
 
 
 def test_predicted_flight_curves_match_passes():

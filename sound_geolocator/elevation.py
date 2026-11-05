@@ -98,3 +98,63 @@ class DEM:
         if cache:
             dem.save(cache)
         return dem
+
+
+TERRARIUM = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
+
+
+def terrarium_elevation(lat, lon, zoom=9, cache_dir=None, progress=None):
+    """Ground height (m above sea level) at many points, worldwide, from the free AWS terrain tiles.
+
+    Uses the Mapzen/AWS "terrarium" PNG tiles (SRTM and others; about 300 m
+    per pixel at zoom 9 in mid latitudes, good enough for a listener height).
+    Only the tiles that contain points are downloaded; ``cache_dir`` keeps
+    them for next time.
+    """
+    import io
+
+    import requests
+    from PIL import Image
+
+    lat = np.asarray(lat, float)
+    lon = np.asarray(lon, float)
+    n = 2 ** zoom
+    xf = (lon + 180.0) / 360.0 * n
+    la = np.radians(np.clip(lat, -85.05, 85.05))
+    yf = (1.0 - np.log(np.tan(la) + 1.0 / np.cos(la)) / np.pi) / 2.0 * n
+    tx, ty = np.floor(xf).astype(int) % n, np.clip(np.floor(yf).astype(int), 0, n - 1)
+    px = np.clip(((xf - np.floor(xf)) * 256).astype(int), 0, 255)
+    py = np.clip(((yf - np.floor(yf)) * 256).astype(int), 0, 255)
+    out = np.full(lat.shape, np.nan)
+    key = tx.astype(np.int64) * n + ty
+    tiles = np.unique(key)
+    cache = Path(cache_dir).expanduser() if cache_dir else None
+    if cache:
+        cache.mkdir(parents=True, exist_ok=True)
+    s = requests.Session()
+    for k, kk in enumerate(tiles):
+        if progress:
+            progress(k / len(tiles))
+        x, y = int(kk // n), int(kk % n)
+        f = cache / f"terrarium_{zoom}_{x}_{y}.png" if cache else None
+        if f is not None and f.exists():
+            raw = f.read_bytes()
+        else:
+            raw = None
+            for attempt in range(4):
+                try:
+                    r = s.get(TERRARIUM.format(z=zoom, x=x, y=y), timeout=30)
+                    r.raise_for_status()
+                    raw = r.content
+                    break
+                except Exception:
+                    time.sleep(2 ** attempt)
+            if raw is None:
+                continue
+            if f is not None:
+                f.write_bytes(raw)
+        im = np.asarray(Image.open(io.BytesIO(raw)).convert("RGB"), float)
+        h = im[..., 0] * 256 + im[..., 1] + im[..., 2] / 256 - 32768
+        m = key == kk
+        out[m] = h[py[m], px[m]]
+    return out
