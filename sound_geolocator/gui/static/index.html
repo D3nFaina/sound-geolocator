@@ -113,6 +113,8 @@
   <input id="curvesFile" type="file" accept=".json">
 
   <h2><span class="n">3</span>Flights</h2>
+  <label>Region to search (restricting the world to a continent or country cuts the work and the false matches)</label>
+  <select id="regionSel" style="width:100%;background:#0d0f13;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px"></select>
   <label>Whole day, worldwide (adsb.lol day: the <b>.tar.aa</b> part, or the converted <b>.sgday</b> folder)</label>
   <div style="display:grid;grid-template-columns:1fr auto;gap:6px"><input id="dayPath" type="text" placeholder="~/Downloads/v2026.09.08-planes-readsb-prod-0.sgday"><button id="dayBtn">Open</button></div>
   <div id="dayInfo" class="sub" style="margin-top:4px"></div>
@@ -124,10 +126,41 @@
   <button id="openskyBtn" title="Recent data only (about the last hour)">Fetch from OpenSky</button>
   <label>…or a day of ADS-B history on this computer (adsb.lol / ADS-B Exchange folder or .tar)</label>
   <div style="display:grid;grid-template-columns:1fr auto;gap:6px"><input id="histPath" type="text" placeholder="~/Downloads/v2025.06.01-planes-readsb-prod-0.tar"><button id="histBtn">Load</button></div>
-  <p class="sub" style="margin-top:4px">Uses the search centre, radius + 20 km, and the start time ± uncertainty from step 4.</p>
+  <p class="sub" style="margin-top:4px">Uses the search centre, radius + 20 km, and the start time ± uncertainty from step 5.</p>
   <div id="tracksInfo" class="sub" style="margin-top:6px"></div>
 
-  <h2><span class="n">4</span>Search</h2>
+  <h2><span class="n">4</span>Guided search, step by step</h2>
+  <p class="sub">Uses the day archive and the region from step 3, and your fitted passes from step 2. Each step shows its result on the map; check it before the next one.</p>
+  <div class="row"><div><label>anchor pass (best fit)</label><select id="gAnchor" style="width:100%;background:#0d0f13;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px"></select></div>
+    <div><label>other passes</label><div id="gOthers" class="sub"></div></div></div>
+  <div class="row"><div><label>systematic allowance %</label><input id="gSys" type="number" value="3" step="0.5" title="Added to the fit errors for the speed of sound and wind: distance, speed and t_cpa tolerances"></div><div><label>wind allowance m/s</label><input id="gWind" type="number" value="15"></div></div>
+  <button id="gSearch" class="primary" style="width:100%;margin-top:6px">a · Anchored search</button>
+  <div id="gSearchRes" class="sub"></div>
+  <label class="chk" style="margin-top:8px"><input id="gSilOn" type="checkbox" checked> silence filter between the passes; heard within slant km:</label>
+  <div class="row">
+    <div><label>propeller</label><input id="g_r_prop" type="number" value="2.5" step="0.5"></div>
+    <div><label>helicopter</label><input id="g_r_heli" type="number" value="2.5" step="0.5"></div>
+    <div><label>jet</label><input id="g_r_jet" type="number" value="4.5" step="0.5"></div>
+    <div><label>unknown</label><input id="g_r_unknown" type="number" value="3.5" step="0.5"></div>
+  </div>
+  <button id="gSilence" style="width:100%;margin-top:6px">b · Silence filter</button>
+  <div id="gSilRes" class="sub"></div>
+  <label class="chk" style="margin-top:8px"><input id="gModel" type="checkbox" checked> compare with the fitted model curves (untick: with the digitised points)</label>
+  <label class="chk"><input id="gJoint" type="checkbox" checked> fit place and start time to all passes together (untick: to the anchor alone, then lock)</label>
+  <button id="gRank" style="width:100%;margin-top:6px">c · Fit and rank the places</button>
+  <div id="gRankBox" style="display:none;margin-top:6px">
+    <canvas id="gPlot" width="300" height="300" style="width:100%;background:#0d0f13;border:1px solid var(--line);border-radius:6px;cursor:crosshair"></canvas>
+    <div class="sub" id="gRankInfo"></div>
+    <div id="gRankList"></div>
+  </div>
+  <div class="row" style="margin-top:8px"><div><label>fine grid: box half-size m</label><input id="gHalf" type="number" value="500" step="100"></div><div><label>step m</label><input id="gStep" type="number" value="5" step="1"></div></div>
+  <div><label>passes in the fine grid</label><div id="gGridPasses" class="sub"></div></div>
+  <button id="gGrid" style="width:100%;margin-top:6px">d · Fine grid around the selected place</button>
+  <div id="gGridRes" class="sub"></div>
+  <div id="gGridLayers"></div>
+  <label>overlay opacity <input id="gOp" type="range" min="0" max="1" step="0.05" value="0.5"></label>
+
+  <h2><span class="n">5</span>Search</h2>
   <p class="sub">Click the map to set the search centre.</p>
   <div class="row">
     <div><label>centre lat</label><input id="lat" type="text"></div>
@@ -198,7 +231,7 @@
     <div class="sub" id="rankInfo"></div>
     <div id="rankList"></div>
   </div>
-  <h2><span class="n">5</span>Candidates on the sound map</h2>
+  <h2><span class="n">6</span>Candidates on the sound map</h2>
   <p class="sub">Draw the predicted Doppler lines of the real flights for a place and start time on top of the spectrogram, to check them against what you hear. Use the search centre and start time above, or the <b>on spectrogram</b> buttons of a result. Each flight's tone is set from the pass it overlaps best.</p>
   <button id="predictHere" style="width:100%">Show flights at the search centre</button>
   <div class="row" style="margin-top:4px"><div><label>within km</label><input id="ovKm" type="number" value="15"></div><div><label class="chk" style="margin-top:22px"><input id="showUnmatched" type="checkbox"> also flights matching no pass</label></div></div>

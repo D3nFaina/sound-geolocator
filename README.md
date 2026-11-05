@@ -95,6 +95,15 @@ sgeo locate curves.json tracks.csv --center 45.46,9.19 --radius 25 \
 
 With a whole day loaded and two or more fitted passes, **Search worldwide** (or `DayArchive.search_world`) needs no search area. Every low aircraft sample with the right ground speed votes for the places abeam of it at about the fitted distance, and for the recording start time that would put the pass at the right moment. Places and times where different aircraft match every pass are candidates. Places with a lot of low traffic (airports) rank lower, because a mostly quiet recording can't have been made there. The best candidates are then checked with the full curve match (`refine_world`). Treat the result as a short list to inspect, not a final answer.
 
+### Guided search, step by step (GUI step 4)
+
+Pick the region in step 3 (worldwide, a continent or a country), then:
+
+1. **Anchored search.** Choose the best-fitted pass as the anchor and tick the other passes. For every aircraft at the anchor's speed, every second of its track, the listener is placed abeam at the anchor's fitted distance (on the terrain), which also fixes the recording start. The other passes are placed the same way; only places where all of them agree on position and start time (fit errors, 3σ, plus a systematic allowance for the speed of sound and wind) are kept.
+2. **Silence filter.** Places where another aircraft came within the per-type slant distance during the quiet stretches between the passes are dropped.
+3. **Fit and rank.** The real aircraft tracks are simulated (retarded-time Doppler, reported GNSS velocity) and fitted to the passes (fitted model curves or digitised points). By default the position and start time are fitted to all passes together; the plot shows the misfit of the anchor against the others, with the time slide each other pass would prefer.
+4. **Fine grid.** Around the selected place: misfit maps per pass and combined, drawn semi-transparent over the satellite map.
+
 ### Places that hear the passes, and the silence filter
 
 **Find places that hear the passes** (step 4) lists every 2 km cell and start time, in the continental US or worldwide, where real flights match each ticked pass. The speed window is the fit's 3σ + 3 % + a wind allowance; the distance window is max(3σ, 20 %). The quiet stretches between consecutive ticked passes then act as a **silence filter** (`DayArchive.silence_ok`): a place is dropped when any other aircraft came within a slant distance during a gap. The distance is set per aircraft type (defaults: propeller and helicopter 3.5 km, jet 6 km, unknown 4.5 km), since a small plane is only heard from close by. Aircraft above the archive's 7 km limit never count. The survivors appear on the map as dots coloured by recording start; click one to make it the search centre.

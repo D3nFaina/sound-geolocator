@@ -146,19 +146,22 @@ def join(A, B, pos_tol_m, t_tol_s, distinct=True, chunk=2_000_000):
 
 def anchor_search(archive, fit_anchor, fit_other, bbox=None, sys_frac=0.03, wind=15.0, ground_fn=None,
                   block_s=3600.0, progress=None):
-    """Candidates (WorldCandidate list) where the anchor pass and the other pass agree.
+    """Candidates (WorldCandidate list) where the anchor pass and every other pass agree.
 
-    Each candidate's position and start time are the anchor's (locked); the
-    other pass only confirms. ``aircraft`` is [anchor aircraft, other aircraft].
-    Also returns per candidate the start-time and position mismatch of the
-    other pass.
+    ``fit_other`` is one fit or a list of fits. Each candidate's position and
+    start time are the anchor's (locked); the other passes only confirm.
+    ``aircraft`` is [anchor aircraft, other aircraft...]. Also returns per
+    candidate and other pass the start-time mismatch (s) and position
+    mismatch (m), shape (N, passes) (or (N,) with a single other pass).
     """
     from .adsb_day import WorldCandidate
 
+    single = isinstance(fit_other, dict)
+    others = [fit_other] if single else list(fit_other)
     wa = pass_window(fit_anchor, sys_frac, wind)
-    wb = pass_window(fit_other, sys_frac, wind)
-    pos_tol = wa["d_tol"] + wb["d_tol"] + 150.0  # both cross-track tolerances + 1 s stepping
-    t_tol = wa["t_tol"] + wb["t_tol"] + 1.0
+    wbs = [pass_window(f, sys_frac, wind) for f in others]
+    pos_tols = [wa["d_tol"] + wb["d_tol"] + 150.0 for wb in wbs]  # both cross-track tolerances + 1 s stepping
+    t_tols = [wa["t_tol"] + wb["t_tol"] + 1.0 for wb in wbs]
     day0 = archive.day0
     out, dt_mis, dpos = [], [], []
     seen = set()
@@ -169,28 +172,54 @@ def anchor_search(archive, fit_anchor, fit_other, bbox=None, sys_frac=0.03, wind
         lo_t = day0 - 3600 + kb * block_s
         A = listener_points(archive, wa, bbox, ground_fn=ground_fn, t_lo=lo_t, t_hi=lo_t + block_s)
         A = {k: v[(A["t0"] >= lo_t) & (A["t0"] < lo_t + block_s)] for k, v in A.items()}
-        if not len(A["lat"]):
+        nA = len(A["lat"])
+        if not nA:
             continue
-        B = listener_points(archive, wb, bbox, ground_fn=ground_fn, t_lo=lo_t - t_tol, t_hi=lo_t + block_s + t_tol)
-        i, j = join(A, B, pos_tol, t_tol)
-        if not len(i):
+        # per other pass: for each anchor point the best-agreeing aircraft (or none)
+        alive = np.ones(nA, bool)
+        match = []
+        for wb, pt, tt in zip(wbs, pos_tols, t_tols):
+            B = listener_points(archive, wb, bbox, ground_fn=ground_fn, t_lo=lo_t - tt, t_hi=lo_t + block_s + tt)
+            i, j = join(A, B, pt, tt) if len(B["lat"]) else (np.zeros(0, int), np.zeros(0, int))
+            dn = np.radians(B["lat"][j] - A["lat"][i]) * R_EARTH
+            de = np.radians(B["lon"][j] - A["lon"][i]) * R_EARTH * np.cos(np.radians(A["lat"][i]))
+            dp = np.hypot(dn, de)
+            dt = B["t0"][j] - A["t0"][i]
+            bad = (dp / pt) ** 2 + (dt / tt) ** 2
+            o = np.lexsort((bad, i))
+            i, j, dp, dt = i[o], j[o], dp[o], dt[o]
+            first = np.unique(i, return_index=True)[1]
+            mj = np.full(nA, -1)
+            mdt = np.full(nA, np.nan)
+            mdp = np.full(nA, np.nan)
+            mj[i[first]], mdt[i[first]], mdp[i[first]] = j[first], dt[first], dp[first]
+            alive &= mj >= 0
+            match.append((B["ac"], mj, mdt, mdp))
+            if not alive.any():
+                break
+        if not alive.any():
             continue
-        ia, ib = A["ac"][i].astype(np.int64), B["ac"][j].astype(np.int64)
-        # one candidate per aircraft pair, side and 3 s of start time (neighbouring seconds converge in the fit)
-        key = np.stack([ia, ib, np.floor(A["t0"][i] / 3.0).astype(np.int64), A["side"][i].astype(np.int64)], 1)
+        ii = np.nonzero(alive)[0]
+        acs = [A["ac"][ii].astype(np.int64)] + [m[0][m[1][ii]].astype(np.int64) for m in match]
+        # one candidate per aircraft set, side and 3 s of start time (neighbouring seconds converge in the fit)
+        key = np.stack(acs + [np.floor(A["t0"][ii] / 3.0).astype(np.int64), A["side"][ii].astype(np.int64)], 1)
         _, first = np.unique(key, axis=0, return_index=True)
         for f in first:
-            a, b = i[f], j[f]
-            k4 = tuple(int(x) for x in key[f])
-            if k4 in seen:
+            a = ii[f]
+            kk = tuple(int(x) for x in key[f])
+            if kk in seen or len(set(kk[:len(acs)])) < len(acs):  # one aircraft can't be two passes
                 continue
-            seen.add(k4)
-            out.append(WorldCandidate(float(A["lat"][a]), float(A["lon"][a]), float(A["t0"][a]), 2, 1,
-                                      [archive.meta[int(ia[f])][0], archive.meta[int(ib[f])][0]], 0))
-            dt_mis.append(float(B["t0"][b] - A["t0"][a]))
-            dn = np.radians(B["lat"][b] - A["lat"][a]) * R_EARTH
-            de = np.radians(B["lon"][b] - A["lon"][a]) * R_EARTH * np.cos(np.radians(A["lat"][a]))
-            dpos.append(float(np.hypot(dn, de)))
+            seen.add(kk)
+            out.append(WorldCandidate(float(A["lat"][a]), float(A["lon"][a]), float(A["t0"][a]), len(acs), 1,
+                                      [archive.meta[int(x[f])][0] for x in acs], 0))
+            dt_mis.append([float(m[2][a]) for m in match])
+            dpos.append([float(m[3][a]) for m in match])
     if progress:
         progress(1.0)
-    return out, np.array(dt_mis), np.array(dpos), dict(anchor=wa, other=wb, pos_tol=pos_tol, t_tol=t_tol)
+    dt_mis, dpos = np.array(dt_mis).reshape(-1, len(others)), np.array(dpos).reshape(-1, len(others))
+    if single:
+        dt_mis, dpos = dt_mis[:, 0], dpos[:, 0]
+    info = dict(anchor=wa, others=wbs, pos_tol=pos_tols, t_tol=t_tols)
+    if single:
+        info.update(other=wbs[0], pos_tol=pos_tols[0], t_tol=t_tols[0])
+    return out, dt_mis, dpos, info

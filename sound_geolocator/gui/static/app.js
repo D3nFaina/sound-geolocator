@@ -310,8 +310,8 @@ layers['Satellite (Esri)'].addTo(map);
 // flights per aircraft type, each a map overlay that can be switched on and off
 const CAT = { prop: ['Flights: propeller', '#80ed99'], jet: ['Flights: jet', '#c0c6d0'], heli: ['Flights: helicopter', '#ffd166'], unknown: ['Flights: unknown type', '#8a93a3'] };
 const trackLayers = Object.fromEntries(Object.keys(CAT).map((k) => [k, L.layerGroup().addTo(map)]));
-const resultLayer = L.layerGroup().addTo(map), worldLayer = L.layerGroup().addTo(map), areaLayer = L.layerGroup().addTo(map), rankLayer = L.layerGroup().addTo(map);
-const mapOverlays = { ...Object.fromEntries(Object.entries(CAT).map(([k, [name, col]]) => [`<span style="color:${col}">━</span> ${name}`, trackLayers[k]])), 'Location result': resultLayer, 'Worldwide candidates': worldLayer, 'Places that hear the passes': areaLayer, 'Ranked places (top 10)': rankLayer };
+const resultLayer = L.layerGroup().addTo(map), worldLayer = L.layerGroup().addTo(map), areaLayer = L.layerGroup().addTo(map), rankLayer = L.layerGroup().addTo(map), guideLayer = L.layerGroup().addTo(map), gridLayer = L.layerGroup().addTo(map);
+const mapOverlays = { ...Object.fromEntries(Object.entries(CAT).map(([k, [name, col]]) => [`<span style="color:${col}">━</span> ${name}`, trackLayers[k]])), 'Location result': resultLayer, 'Worldwide candidates': worldLayer, 'Places that hear the passes': areaLayer, 'Ranked places (top 10)': rankLayer, 'Guided search': guideLayer, 'Fine grid': gridLayer };
 L.control.layers(layers, mapOverlays, { position: 'topright', collapsed: false }).addTo(map);
 L.control.scale({ imperial: false }).addTo(map);
 let centerMarker = null, searchBox = null;
@@ -367,7 +367,7 @@ $('tracksFile').onchange = async (e) => {
   e.target.value = '';
 };
 $('histBtn').onclick = async () => {
-  if (!$('lat').value || !$('start').value) { status('Set the search centre (click the map) and the recording start in step 4 first', true); return; }
+  if (!$('lat').value || !$('start').value) { status('Set the search centre (click the map) and the recording start in step 5 first', true); return; }
   status('Reading flight history…', false, true); const stop = pollProgress('Flights');
   try {
     const j = await post('/api/tracks/history', { path: $('histPath').value.trim(), lat: +$('lat').value, lon: +$('lon').value, radius: +$('radius').value + 20, start: $('start').value, uncertainty: +$('unc').value });
@@ -465,7 +465,7 @@ $('dayBtn').onclick = async () => {
   } catch (err) { status(err.message, true); }
 };
 $('dayTracksBtn').onclick = async () => {
-  if (!$('lat').value || !$('start').value) { status('Set the search centre (click the map) and the recording start in step 4 first', true); return; }
+  if (!$('lat').value || !$('start').value) { status('Set the search centre (click the map) and the recording start in step 5 first', true); return; }
   status('Loading flights from the day…', false, true);
   try {
     const j = await post('/api/day/tracks', { lat: +$('lat').value, lon: +$('lon').value, radius: +$('radius').value + 20, start: $('start').value, uncertainty: +$('unc').value });
@@ -584,6 +584,118 @@ $('rankPlot').onclick = (e) => {
   RANK.points.forEach((p, i) => { const d = (X(p.rms[0]) - mx) ** 2 + (Y(p.rms[1]) - my) ** 2; if (d < bd) { bd = d; best = i; } });
   if (best >= 0) pickRank(best);
 };
+// ---------------------------------------------------------------- guided search (step 4)
+(async () => {
+  try {
+    const j = await api('/api/regions'); const s = $('regionSel');
+    for (const r of j.regions) { const o = document.createElement('option'); o.value = r.name; o.textContent = r.name; s.appendChild(o); }
+    s.value = localStorage.getItem('region') || 'Worldwide';
+    s.onchange = () => { localStorage.setItem('region', s.value); drawRegion(); }; drawRegion();
+    function drawRegion() { const r = j.regions.find((x) => x.name === s.value); if (window._regionBox) map.removeLayer(window._regionBox); window._regionBox = null;
+      if (r && r.bbox) window._regionBox = L.rectangle([[r.bbox[0], r.bbox[2]], [r.bbox[1], r.bbox[3]]], { color: '#ffd166', weight: 1, fill: false, dashArray: '4 4' }).addTo(map); }
+  } catch (e) { }
+})();
+function refreshGuidePasses() {
+  const fitted = curves.map((c, i) => [c, i]).filter(([c]) => c.fit);
+  const sa = $('gAnchor'), prev = sa.value;
+  sa.innerHTML = fitted.map(([c, i]) => `<option value="${i}">${c.name} (rms ${c.fit.rms_hz} Hz)</option>`).join('');
+  if (prev && fitted.some(([, i]) => String(i) === prev)) sa.value = prev;
+  else if (fitted.length) sa.value = String(fitted.reduce((b, x) => (x[0].fit.rms_hz < b[0].fit.rms_hz ? x : b))[1]);
+  const keep = new Set([...document.querySelectorAll('.gOth:checked')].map((x) => x.value));
+  const fresh = !document.querySelectorAll('.gOth').length;
+  $('gOthers').innerHTML = fitted.filter(([, i]) => String(i) !== sa.value).map(([c, i]) => `<label class="chk"><input type="checkbox" class="gOth" value="${i}" ${fresh || keep.has(String(i)) ? 'checked' : ''}> ${c.name}</label>`).join('') || 'fit another pass';
+}
+$('gAnchor').onchange = refreshGuidePasses;
+const _setCurves = setCurves;
+setCurves = function (cs, bump) { _setCurves(cs, bump); refreshGuidePasses(); };
+let GUIDE = null, gSel = -1;
+function guideDots(pts, col) {
+  guideLayer.clearLayers(); const rend = L.canvas({ padding: 0.3 });
+  for (const p of pts) L.circleMarker([p.lat, p.lon], { renderer: rend, radius: 3, stroke: false, fillOpacity: 0.8, fillColor: col }).bindTooltip(`${p.lat.toFixed(4)}, ${p.lon.toFixed(4)}<br>start ${p.iso.slice(11, 19)} UTC<br>${p.aircraft.join(' / ')}`).addTo(guideLayer);
+  if (pts.length) map.fitBounds(L.latLngBounds(pts.map((p) => [p.lat, p.lon])).pad(0.1));
+}
+async function guideStep(btn, label, url, body, done) {
+  btn.disabled = true; status(label + '…', false, true); const stop = pollProgress(label);
+  try { const j = await post(url, body); stop(); done(j); } catch (err) { stop(); status(err.message, true); }
+  btn.disabled = false;
+}
+$('gSearch').onclick = () => {
+  const others = [...document.querySelectorAll('.gOth:checked')].map((x) => +x.value);
+  guideStep($('gSearch'), 'Anchored search', '/api/flow/search', { anchor: +$('gAnchor').value, others, region: $('regionSel').value, sys: +$('gSys').value, wind: +$('gWind').value }, (j) => {
+    GUIDE = { passes: j.passes, idx: [+$('gAnchor').value, ...others] };
+    const t = j.tol, ot = t.others.map((o, k) => `${j.passes[k + 1]}: ±${Math.round(o.d_tol)} m, start within ±${t.t_tol[k].toFixed(1)} s`).join('; ');
+    $('gSearchRes').innerHTML = `<b>${j.n.toLocaleString()}</b> places in ${$('regionSel').value} where ${j.passes[0]} (anchor, ${Math.round(t.anchor.d_cpa)} ± ${Math.round(t.anchor.d_tol)} m) and ${j.passes.slice(1).join(', ')} agree (${ot}).`;
+    $('gGridPasses').innerHTML = GUIDE.idx.map((i, k) => `<label class="chk"><input type="checkbox" class="gGp" value="${i}" checked> ${j.passes[k]}</label>`).join(' ');
+    guideDots(j.points, '#f8961e'); status(`${j.n} places`);
+  });
+};
+$('gSilence').onclick = () => {
+  const body = { on: $('gSilOn').checked }; for (const k of ['prop', 'heli', 'jet', 'unknown']) body['r_' + k] = +$('g_r_' + k).value;
+  guideStep($('gSilence'), 'Silence filter', '/api/flow/silence', body, (j) => {
+    const gaps = j.gaps.map(([a, b]) => `${Math.round(a)}–${Math.round(b)} s`).join(', ') || 'none';
+    $('gSilRes').innerHTML = `<b>${j.n_quiet.toLocaleString()}</b> of ${j.n.toLocaleString()} places stay quiet in the gaps (${gaps}).`;
+    guideDots(j.points, '#80ed99'); status(`${j.n_quiet} quiet places`);
+  });
+};
+$('gRank').onclick = () => guideStep($('gRank'), 'Ranking', '/api/flow/rank', { against: $('gModel').checked ? 'model' : 'digitised', joint: $('gJoint').checked, c: +$('c').value }, (j) => {
+  GUIDE.rank = j; gSel = j.points.length ? 0 : -1; showGuideRank(); if (gSel >= 0) pickGuide(0, false); status(`${j.points.length} places ranked`);
+});
+function gAxes() {
+  const cv = $('gPlot'), W = cv.width, H = cv.height, P = { l: 40, r: 8, t: 8, b: 32 }, lo = Math.log10(0.05), hi = Math.log10(30);
+  const f = (v) => (Math.log10(Math.min(Math.max(v, 0.05), 30)) - lo) / (hi - lo);
+  return { cv, W, H, P, X: (v) => P.l + f(v) * (W - P.l - P.r), Y: (v) => H - P.b - f(v) * (H - P.t - P.b) };
+}
+const gOther = (p) => Math.sqrt(p.rms_others.reduce((a, v) => a + v * v, 0) / p.rms_others.length);
+function showGuideRank() {
+  const R = GUIDE.rank, pts = R.points; $('gRankBox').style.display = '';
+  const { cv, W, H, P, X, Y } = gAxes(), g = cv.getContext('2d');
+  g.clearRect(0, 0, W, H); g.font = '10px sans-serif'; g.fillStyle = '#8a93a3'; g.strokeStyle = '#2a2f3a';
+  for (const v of [0.1, 0.3, 1, 3, 10]) { g.beginPath(); g.moveTo(X(v), P.t); g.lineTo(X(v), H - P.b); g.moveTo(P.l, Y(v)); g.lineTo(W - P.r, Y(v)); g.stroke(); g.fillText(v, X(v) - 6, H - P.b + 12); g.fillText(v, 18, Y(v) + 3); }
+  g.fillText(`rms on ${R.passes[0]} (Hz)`, W / 2 - 50, H - 4);
+  g.save(); g.translate(10, H / 2 + 50); g.rotate(-Math.PI / 2); g.fillText(`rms on ${R.passes.slice(1).join('+')} (Hz)`, 0, 0); g.restore();
+  for (let i = pts.length - 1; i >= 0; i--) { const p = pts[i], s = Math.max(...p.slide.map(Math.abs)); g.fillStyle = s <= 1 ? '#80ed99' : s <= 3 ? '#ffd166' : '#ef476f'; g.fillRect(X(p.rms_anchor) - 1.5, Y(gOther(p)) - 1.5, 3, 3); }
+  if (gSel >= 0) { const p = pts[gSel]; g.strokeStyle = '#fff'; g.lineWidth = 2; g.beginPath(); g.arc(X(p.rms_anchor), Y(gOther(p)), 6, 0, 7); g.stroke(); g.lineWidth = 1; }
+  $('gRankInfo').innerHTML = `${pts.length.toLocaleString()} places. Dot colour: time slide the other passes would need, <span style="color:#80ed99">≤1 s</span>, <span style="color:#ffd166">≤3 s</span>, <span style="color:#ef476f">more</span>. Click a dot or a row.`;
+  const box = $('gRankList'); box.innerHTML = '';
+  pts.slice(0, 15).forEach((p, k) => {
+    const div = document.createElement('div'); div.className = 'wc' + (k === gSel ? ' sel' : '');
+    const oth = R.passes.slice(1).map((n, q) => `${n} ${p.rms_others[q].toFixed(2)} Hz (slide ${p.slide[q] > 0 ? '+' : ''}${p.slide[q]} s)`).join(' · ');
+    div.innerHTML = `<b>#${k + 1}</b> ${R.passes[0]} ${p.rms_anchor.toFixed(2)} Hz · ${oth}<br><span class="meta">${p.lat.toFixed(5)}, ${p.lon.toFixed(5)} · start ${p.iso.slice(11, 19)} UTC · ${p.aircraft.join(' / ')} · <a href="${gmaps(p.lat, p.lon)}" target="_blank">Google Maps</a></span>`;
+    div.onclick = (e) => { if (e.target.tagName !== 'A') pickGuide(k); };
+    box.appendChild(div);
+  });
+}
+function pickGuide(k, overlay = true) {
+  gSel = k; const p = GUIDE.rank.points[k]; showGuideRank();
+  guideLayer.clearLayers(); GUIDE.rank.points.slice(0, 15).forEach((q, i) => L.circleMarker([q.lat, q.lon], { radius: i === k ? 9 : 5, color: i === k ? '#80ed99' : '#f8961e', weight: 2 }).bindTooltip(`#${i + 1}`).on('click', () => pickGuide(i)).addTo(guideLayer));
+  setCenter(p.lat, p.lon); $('start').value = p.iso; $('alt').value = p.h; map.setView([p.lat, p.lon], 14);
+  if (overlay) predictAt(p.lat, p.lon, p.iso, `guided #${k + 1}`);
+}
+$('gPlot').onclick = (e) => {
+  if (!GUIDE || !GUIDE.rank) return; const { cv, X, Y } = gAxes(), r = cv.getBoundingClientRect();
+  const mx = (e.clientX - r.left) * cv.width / r.width, my = (e.clientY - r.top) * cv.height / r.height;
+  let best = -1, bd = 64; GUIDE.rank.points.forEach((p, i) => { const d = (X(p.rms_anchor) - mx) ** 2 + (Y(gOther(p)) - my) ** 2; if (d < bd) { bd = d; best = i; } });
+  if (best >= 0) pickGuide(best);
+};
+$('gGrid').onclick = () => {
+  if (!GUIDE || !GUIDE.rank || gSel < 0) { status('Rank the places and pick one first', true); return; }
+  const passes = [...document.querySelectorAll('.gGp:checked')].map((x) => +x.value);
+  guideStep($('gGrid'), 'Fine grid', '/api/flow/grid', { rank: gSel, half: +$('gHalf').value, step: +$('gStep').value, passes, against: $('gModel').checked ? 'model' : 'digitised', c: +$('c').value }, (j) => {
+    GUIDE.grid = j; const box = $('gGridLayers'); box.innerHTML = '';
+    j.layers.forEach((l, k) => { const lab = document.createElement('label'); lab.className = 'chk';
+      lab.innerHTML = `<input type="radio" name="gLay" value="${k}" ${k === j.layers.length - (j.layers.length > 1 ? 2 : 1) ? 'checked' : ''}> ${l.name}: best ${l.rms} Hz at ${l.best[0].toFixed(5)}, ${l.best[1].toFixed(5)}`; box.appendChild(lab); });
+    box.querySelectorAll('input').forEach((x) => (x.onchange = showGridLayer));
+    $('gGridRes').innerHTML = `Colours: rms misfit 0.2 Hz (dark blue) to 5 Hz (dark red), log scale. Best combined start ${j.best_start_iso.slice(11, 19)} UTC.`;
+    showGridLayer(); map.fitBounds(j.bounds); status('Fine grid ready');
+  });
+};
+function showGridLayer() {
+  const j = GUIDE.grid, k = +(document.querySelector('input[name=gLay]:checked') || { value: 0 }).value, l = j.layers[k];
+  gridLayer.clearLayers();
+  L.imageOverlay(l.img, j.bounds, { opacity: +$('gOp').value }).addTo(gridLayer);
+  L.circleMarker(l.best, { radius: 7, color: '#fff', weight: 3, fillColor: '#000', fillOpacity: 1 }).bindTooltip(`${l.name}: best ${l.rms} Hz<br>${l.best[0].toFixed(5)}, ${l.best[1].toFixed(5)}`).addTo(gridLayer);
+}
+$('gOp').oninput = () => gridLayer.eachLayer((l) => l.setOpacity && l.setOpacity(+$('gOp').value));
 // remember the paths typed last time
 for (const id of ['path', 'histPath', 'dayPath']) { const v = localStorage.getItem(id); if (v && !$(id).value) $(id).value = v; $(id).addEventListener('change', () => localStorage.setItem(id, $(id).value)); }
 

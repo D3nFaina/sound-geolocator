@@ -63,6 +63,8 @@ class State:
         self.day_build = None  # (path, subprocess) while converting
         self.overlays = {}  # key -> predicted flight curves for one place and start time
         self.area = None  # (candidates, curves) of the last 'places that hear the passes' search
+        self.flow = {}  # guided search: region, passes, candidates, ranking, fine grid
+        self.terrain = None  # TerrainTiles, created on first use
 
     def compute_spec(self):
         p = self.params
@@ -141,6 +143,42 @@ def _spec_json():
             "f0": float(sp.freqs[0]), "f1": float(sp.freqs[-1]), "params": S.params,
             "duration": float(len(S.audio[0]) / S.audio[1])}
 
+
+
+def _model_curve(cv):
+    """The fitted straight-flyover model of a curve, on its own time span (1 s steps)."""
+    from ..doppler import straight_flyover_ratio
+
+    f = cv.meta["fit"]
+    t = np.arange(np.nanmin(cv.t), np.nanmax(cv.t) + 0.5, 1.0)
+    return DopplerCurve(t=t, f=f["f0"] * straight_flyover_ratio(t, f["t_cpa"], f["speed"], f["d_cpa"]), name=cv.name,
+                        meta=cv.meta)
+
+
+def _terrain(zoom):
+    from ..elevation import TerrainTiles
+
+    if S.terrain is None:
+        S.terrain = {}
+    if zoom not in S.terrain:
+        S.terrain[zoom] = TerrainTiles(zoom=zoom)
+    return S.terrain[zoom]
+
+
+def _overlay_png(r, vmin=0.2, vmax=5.0):
+    """A misfit grid as a jet-coloured PNG (data URL), north up, for a map overlay."""
+    import base64
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LogNorm
+
+    rgba = plt.get_cmap("jet")(LogNorm(vmin, vmax)(np.clip(np.nan_to_num(r, nan=vmax), vmin, vmax)))[::-1]
+    b = io.BytesIO()
+    plt.imsave(b, rgba, format="png")
+    return "data:image/png;base64," + base64.b64encode(b.getvalue()).decode()
 
 def create_app():
     app = Flask(__name__, static_folder=None)
@@ -674,6 +712,158 @@ def create_app():
                         "h": round(float(rk["h"][i])), "ground": round(float(rk["ground"][i])),
                         "aircraft": cd.aircraft})
         return jsonify(passes=[c.name for c in curves], n=len(cands), points=pts)
+
+    # ------------------------------------------------------------ guided search, one step at a time
+    @app.get("/api/regions")
+    def regions():
+        from ..regions import REGIONS
+
+        return jsonify(regions=[{"name": k, "bbox": v} for k, v in REGIONS.items()])
+
+    def _flow_passes(d):
+        fitted = [i for i, c in enumerate(S.curves) if c.meta.get("fit")]
+        a = int(d["anchor"])
+        others = [int(i) for i in d.get("others", []) if int(i) != a]
+        if a not in fitted or not others or any(i not in fitted for i in others):
+            raise ValueError("pick a fitted anchor pass and at least one other fitted pass")
+        return a, others
+
+    @app.post("/api/flow/search")
+    def flow_search():
+        """Step: anchor on one pass, lock its time, keep places where every other pass agrees."""
+        from ..anchor import anchor_search
+        from ..regions import region_bbox
+
+        if S.day is None:
+            raise ValueError("open the day archive first (step 3)")
+        d = request.get_json()
+        a, others = _flow_passes(d)
+        bbox = region_bbox(d.get("region"))
+        S.progress = {"stage": "terrain heights and anchored search", "fraction": 0.0}
+
+        def prog(fr):
+            S.progress = {"stage": "anchored search", "fraction": round(fr, 3)}
+
+        cands, dt, dp, info = anchor_search(S.day, S.curves[a].meta["fit"], [S.curves[i].meta["fit"] for i in others],
+                                            bbox=bbox, sys_frac=float(d.get("sys", 3)) / 100, wind=float(d.get("wind", 15)),
+                                            ground_fn=_terrain(8), progress=prog)
+        S.flow = {"region": d.get("region"), "anchor": a, "others": others, "cands": cands, "dt": dt, "dp": dp,
+                  "silence": None, "rank": None}
+        S.progress = {"stage": "done", "fraction": 1.0}
+        names = [S.curves[a].name] + [S.curves[i].name for i in others]
+        pts = [{"lat": round(c.lat, 5), "lon": round(c.lon, 5), "t0": c.t_start, "iso": _iso(c.t_start), "aircraft": c.aircraft}
+               for c in cands[:60000]]
+        return jsonify(n=len(cands), points=pts, passes=names,
+                       tol={"anchor": info["anchor"], "others": info["others"], "pos_tol": info["pos_tol"],
+                            "t_tol": info["t_tol"]})
+
+    @app.post("/api/flow/silence")
+    def flow_silence():
+        """Step: drop places where some other aircraft was close enough to be heard between the passes."""
+        if not S.flow.get("cands"):
+            raise ValueError("run the anchored search first")
+        d = request.get_json()
+        radius = {k: float(d.get("r_" + k, v)) * 1000 for k, v in
+                  {"prop": 2.5, "heli": 2.5, "jet": 4.5, "unknown": 3.5}.items()}
+        idx = [S.flow["anchor"]] + S.flow["others"]
+        order = sorted(idx, key=lambda i: np.nanmin(S.curves[i].t))
+        cands = S.flow["cands"]
+        ok = np.ones(len(cands), bool)
+        gaps = []
+        if d.get("on", True):
+            for i, j in zip(order[:-1], order[1:]):
+                w0, w1 = float(np.nanmax(S.curves[i].t)) + 10, float(np.nanmin(S.curves[j].t)) - 20
+                if w1 - w0 < 60:
+                    continue
+                gaps.append([w0, w1])
+                S.progress = {"stage": f"silence filter {S.curves[i].name}-{S.curves[j].name}", "fraction": 0.5}
+                ok &= S.day.silence_ok(cands, w0, w1, radius, cell_km=2.0)
+        S.flow["silence"] = ok
+        S.flow["rank"] = None
+        S.progress = {"stage": "done", "fraction": 1.0}
+        keep = np.nonzero(ok)[0]
+        pts = [{"lat": round(cands[k].lat, 5), "lon": round(cands[k].lon, 5), "iso": _iso(cands[k].t_start),
+                "aircraft": cands[k].aircraft} for k in keep[:60000]]
+        return jsonify(n=len(cands), n_quiet=int(ok.sum()), gaps=gaps, points=pts)
+
+    @app.post("/api/flow/rank")
+    def flow_rank():
+        """Step: fit the anchor pass with the real aircraft and lock it; score the other passes with that start time."""
+        from ..rank import rank_locked
+
+        if not S.flow.get("cands"):
+            raise ValueError("run the anchored search first")
+        d = request.get_json()
+        ok = S.flow["silence"] if S.flow.get("silence") is not None else np.ones(len(S.flow["cands"]), bool)
+        keep = np.nonzero(ok)[0][:int(d.get("max", 20000))]
+        cands = [S.flow["cands"][k] for k in keep]
+        if not cands:
+            raise ValueError("no place left to rank")
+        model = d.get("against", "model") == "model"
+        cv = lambda i: _model_curve(S.curves[i]) if model else S.curves[i]
+        ground = _terrain(9)(np.array([c.lat for c in cands]), np.array([c.lon for c in cands]))
+
+        def prog(fr):
+            S.progress = {"stage": "fitting the anchor pass, scoring the others", "fraction": round(fr, 3)}
+
+        rk = rank_locked(S.day, cands, cv(S.flow["anchor"]), [cv(i) for i in S.flow["others"]], ground,
+                         c=float(d.get("c", 340)), joint=bool(d.get("joint", True)),
+                         pos_box_m=1200.0 if d.get("joint", True) else 600.0, shift_box_s=5.0, progress=prog)
+        S.progress = {"stage": "done", "fraction": 1.0}
+        score = np.sqrt((rk["rms_anchor"] ** 2 + np.sum(rk["rms_locked"] ** 2, 1)) / (1 + rk["rms_locked"].shape[1]))
+        order = np.argsort(np.where(np.isfinite(score), score, np.inf))
+        pts = []
+        for i in order:
+            if not np.isfinite(score[i]):
+                break
+            pts.append({"k": int(i), "lat": round(float(rk["lat"][i]), 6), "lon": round(float(rk["lon"][i]), 6),
+                        "t_start": float(rk["t_start"][i]), "iso": _iso(float(rk["t_start"][i])),
+                        "rms_anchor": round(float(rk["rms_anchor"][i]), 3),
+                        "rms_others": [round(float(v), 3) for v in rk["rms_locked"][i]],
+                        "slide": [round(float(v), 2) for v in rk["dt_other"][i]], "score": round(float(score[i]), 3),
+                        "h": round(float(rk["h"][i])), "aircraft": cands[i].aircraft})
+        S.flow["rank"] = pts
+        names = [S.curves[S.flow["anchor"]].name] + [S.curves[i].name for i in S.flow["others"]]
+        return jsonify(n=len(cands), passes=names, points=pts)
+
+    @app.post("/api/flow/grid")
+    def flow_grid():
+        """Step: fine misfit maps around one ranked place, per pass and combined."""
+        from ..rank import misfit_grid
+
+        if not S.flow.get("rank"):
+            raise ValueError("rank the places first")
+        d = request.get_json()
+        p = S.flow["rank"][int(d.get("rank", 0))]
+        idx = [S.flow["anchor"]] + S.flow["others"]
+        use = [k for k, i in enumerate(idx) if i in set(int(x) for x in d.get("passes", idx))] or list(range(len(idx)))
+        model = d.get("against", "model") == "model"
+        curves = [_model_curve(S.curves[idx[k]]) if model else S.curves[idx[k]] for k in use]
+        half, step = float(d.get("half", 500)), float(d.get("step", 5))
+        if (2 * half / step + 1) ** 2 > 400_000:
+            raise ValueError("too many grid points: make the box smaller or the step larger")
+
+        def prog(fr):
+            S.progress = {"stage": "fine grid", "fraction": round(fr, 3)}
+
+        g = misfit_grid(S.day, [p["aircraft"][k] for k in use], curves, p["lat"], p["lon"], p["t_start"], half_m=half,
+                        step_m=step, shift_s=float(d.get("shift", 4)), ground_fn=_terrain(12), c=float(d.get("c", 340)),
+                        progress=prog)
+        S.progress = {"stage": "done", "fraction": 1.0}
+        la, lo = g["lat"], g["lon"]
+        dla, dlo = (la[1, 0] - la[0, 0]) / 2, (lo[0, 1] - lo[0, 0]) / 2
+        bounds = [[float(la.min() - dla), float(lo.min() - dlo)], [float(la.max() + dla), float(lo.max() + dlo)]]
+        layers = []
+        maps = [(curves[k].name + " alone", g["rms"][k]) for k in range(len(curves))]
+        if len(curves) > 1:
+            maps += [("combined (one start time)", g["combined"]), ("combined, each pass weighted by its fit", g["combined_w"])]
+        for name, r in maps:
+            j = np.unravel_index(np.nanargmin(r), r.shape)
+            layers.append({"name": name, "img": _overlay_png(r), "best": [float(la[j]), float(lo[j])],
+                           "rms": round(float(r[j]), 3)})
+        jc = np.unravel_index(np.nanargmin(g["combined"]), g["combined"].shape)
+        return jsonify(bounds=bounds, layers=layers, center=[p["lat"], p["lon"]],
+                       best_start_iso=_iso(p["t_start"] + float(g["shift"][jc])))
 
     @app.post("/api/tracks/opensky")
     def opensky():
