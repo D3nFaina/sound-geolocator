@@ -538,7 +538,7 @@ function showArea(j) {
 let RANK = null, rankSel = -1;
 $('rankBtn').onclick = async () => {
   const btn = $('rankBtn'); btn.disabled = true; status('Simulating the aircraft\'s Doppler curves at every place…', false, true); const stop = pollProgress('Ranking');
-  try { RANK = await post('/api/day/rank', { c: +$('c').value }); stop(); rankSel = RANK.points.length ? 0 : -1; showRank(); status(`${RANK.points.length} places ranked`); }
+  try { RANK = await post('/api/day/rank', { c: +$('c').value, against: $('rankModel').checked ? 'model' : 'digitised' }); stop(); rankSel = RANK.points.length ? 0 : -1; showRank(); status(`${RANK.points.length} places ranked`); }
   catch (err) { stop(); status(err.message, true); }
   btn.disabled = false;
 };

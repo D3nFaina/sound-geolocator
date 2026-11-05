@@ -126,8 +126,11 @@ def terrarium_elevation(lat, lon, zoom=9, cache_dir=None, progress=None):
     px = np.clip(((xf - np.floor(xf)) * 256).astype(int), 0, 255)
     py = np.clip(((yf - np.floor(yf)) * 256).astype(int), 0, 255)
     out = np.full(lat.shape, np.nan)
-    key = tx.astype(np.int64) * n + ty
-    tiles = np.unique(key)
+    key = (tx.astype(np.int64) * n + ty).ravel()
+    order = np.argsort(key, kind="stable")
+    tiles, first, counts = np.unique(key[order], return_index=True, return_counts=True)
+    flat = out.ravel()
+    pxf, pyf = px.ravel(), py.ravel()
     cache = Path(cache_dir).expanduser() if cache_dir else None
     if cache:
         cache.mkdir(parents=True, exist_ok=True)
@@ -155,6 +158,43 @@ def terrarium_elevation(lat, lon, zoom=9, cache_dir=None, progress=None):
                 f.write_bytes(raw)
         im = np.asarray(Image.open(io.BytesIO(raw)).convert("RGB"), float)
         h = im[..., 0] * 256 + im[..., 1] + im[..., 2] / 256 - 32768
-        m = key == kk
-        out[m] = h[py[m], px[m]]
-    return out
+        m = order[first[k]:first[k] + counts[k]]
+        flat[m] = h[pyf[m], pxf[m]]
+    return flat.reshape(lat.shape)
+
+
+class TerrainTiles:
+    """Ground height lookups from terrarium tiles, decoded once and kept in memory: ``tiles(lat, lon)``."""
+
+    def __init__(self, zoom=8, cache_dir="~/.cache/sound_geolocator/terrarium"):
+        self.zoom, self.cache_dir, self.mem = zoom, cache_dir, {}
+
+    def __call__(self, lat, lon):
+        lat = np.asarray(lat, float)
+        lon = np.asarray(lon, float)
+        n = 2 ** self.zoom
+        xf = (lon + 180.0) / 360.0 * n
+        la = np.radians(np.clip(lat, -85.05, 85.05))
+        yf = (1.0 - np.log(np.tan(la) + 1.0 / np.cos(la)) / np.pi) / 2.0 * n
+        tx, ty = np.floor(xf).astype(np.int64) % n, np.clip(np.floor(yf).astype(np.int64), 0, n - 1)
+        px = np.clip(((xf - np.floor(xf)) * 256).astype(int), 0, 255)
+        py = np.clip(((yf - np.floor(yf)) * 256).astype(int), 0, 255)
+        key = tx * n + ty
+        out = np.full(lat.shape, np.nan)
+        order = np.argsort(key, kind="stable")
+        tiles, first, counts = np.unique(key[order], return_index=True, return_counts=True)
+        for k, kk in enumerate(tiles):
+            h = self.mem.get(int(kk))
+            if h is None:
+                x, y = int(kk // n), int(kk % n)
+                # fetch the whole tile through terrarium_elevation (cached on disk), as a 256 x 256 grid
+                ii, jj = np.mgrid[0:256, 0:256]
+                yy = (y + (ii + 0.5) / 256) / n
+                xx = (x + (jj + 0.5) / 256) / n
+                glat = np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * yy))))
+                glon = xx * 360.0 - 180.0
+                h = terrarium_elevation(glat, glon, zoom=self.zoom, cache_dir=self.cache_dir)
+                self.mem[int(kk)] = h
+            m = order[first[k]:first[k] + counts[k]]
+            out[m] = h[py[m], px[m]]
+        return out

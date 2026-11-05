@@ -186,3 +186,73 @@ def rank_candidates(archive, cands, curves, ground_m=None, c=340.0, step_s=1.0, 
     if progress:
         progress(1.0)
     return out
+
+
+def rank_locked(archive, cands, anchor_curve, other_curve, ground_m, c=340.0, pos_box_m=600.0, shift_box_s=3.0,
+                step_s=1.0, chunk=4000, scan_s=10.0, progress=None):
+    """Fit the anchor pass only, lock listener and start time, then score the other pass.
+
+    For the other pass only its tone f0 is free: ``rms_locked`` is its misfit
+    with the anchor's start time, and ``dt_other`` is how far its curve would
+    have to slide in time to fit best (``rms_slid``): a real match has
+    dt_other close to 0.
+    """
+    cands = list(cands)
+    N = len(cands)
+    ground = np.nan_to_num(np.asarray(ground_m, float), nan=0.0)
+    el = np.maximum(ground, 0.0)
+    obs = []
+    for cv in (anchor_curve, other_curve):
+        t, f = np.asarray(cv.t, float), np.asarray(cv.f, float)
+        k = max(1, int(round(step_s / max(np.median(np.diff(t)), 1e-3))))
+        t, f = t[::k], f[::k]
+        m = np.isfinite(f)
+        obs.append((t[m], f[m]))
+    # the other pass's grid must reach the slid times too
+    ext = (np.concatenate([[obs[1][0][0] - scan_s], obs[1][0], [obs[1][0][-1] + scan_s]]))
+    idx = {m[0]: i for i, m in enumerate(archive.meta)}
+    keys = ("rms_anchor", "rms_locked", "rms_slid", "dt_other", "f0_anchor", "f0_other", "east", "north", "h", "shift")
+    out = {k: np.full(N, np.nan) for k in keys}
+    shifts = np.arange(-scan_s, scan_s + 1e-9, 0.25)
+    for c0 in range(0, N, chunk):
+        if progress:
+            progress(c0 / N)
+        sub = cands[c0:c0 + chunk]
+        n = len(sub)
+        GA, GB, gA, gB = [], [], np.empty(n), np.empty(n)
+        for k, cd in enumerate(sub):
+            g0, G, _ = _track_grid(archive, idx, cd.aircraft[0], cd.lat, cd.lon, cd.t_start, obs[0][0])
+            GA.append(G); gA[k] = g0
+            g0, G, _ = _track_grid(archive, idx, cd.aircraft[1], cd.lat, cd.lon, cd.t_start, ext)
+            GB.append(G); gB[k] = g0
+        GA, GB = np.stack(GA), np.stack(GB)
+        e = el[c0:c0 + n]
+        lo = np.stack([np.full(n, -pos_box_m), np.full(n, -pos_box_m), e - 100, np.full(n, -shift_box_s)], 1)
+        hi = np.stack([np.full(n, pos_box_m), np.full(n, pos_box_m), e + 150, np.full(n, shift_box_s)], 1)
+        x0 = np.zeros((n, 4))
+        x0[:, 2] = e + 20
+        x, rms, f0s = _fit_batch([GA], [gA], obs[:1], x0, lo, hi, c)
+        rB, f0B = _pass_residuals(x, GB, gB, obs[1][0], obs[1][1], c)
+        best = np.full(n, np.inf)
+        bdt = np.zeros(n)
+        for s in shifts:
+            xs = x.copy()
+            xs[:, 3] += s
+            r, _ = _pass_residuals(xs, GB, gB, obs[1][0], obs[1][1], c)
+            v = np.sqrt(np.mean(r ** 2, 1))
+            better = v < best
+            best[better], bdt[better] = v[better], s
+        sl = slice(c0, c0 + n)
+        out["rms_anchor"][sl], out["f0_anchor"][sl] = rms[0], f0s[0]
+        out["rms_locked"][sl], out["f0_other"][sl] = np.sqrt(np.mean(rB ** 2, 1)), f0B
+        out["rms_slid"][sl], out["dt_other"][sl] = best, bdt
+        out["east"][sl], out["north"][sl], out["h"][sl], out["shift"][sl] = x.T
+    lat0 = np.array([cd.lat for cd in cands])
+    lon0 = np.array([cd.lon for cd in cands])
+    out["lat"] = lat0 + np.degrees(out["north"] / R_EARTH)
+    out["lon"] = lon0 + np.degrees(out["east"] / (R_EARTH * np.cos(np.radians(lat0))))
+    out["t_start"] = np.array([cd.t_start for cd in cands]) + out["shift"]
+    out["ground"] = ground
+    if progress:
+        progress(1.0)
+    return out

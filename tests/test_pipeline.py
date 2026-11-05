@@ -202,6 +202,18 @@ def test_day_archive_and_world_search(tmp_path):
     assert haversine_m(rk["lat"][i], rk["lon"][i], truth[0], truth[1]) < 100
     assert abs(rk["t_start"][i] - t0) < 1
     assert abs(rk["f0"][i, 0] - 90) < 0.5
+    # anchor on pass 1, lock its time, test pass 2: only the true pair at the true place survives
+    from sound_geolocator.anchor import anchor_search
+    from sound_geolocator.rank import rank_locked
+
+    fa = dict(t_cpa=100.0, speed=120.0, d_cpa=d1, speed_err=0.3, d_cpa_err=20, t_cpa_err=0.1)
+    fb = dict(t_cpa=200.0, speed=140.0, d_cpa=d2, speed_err=0.3, d_cpa_err=20, t_cpa_err=0.2)
+    ac, _, _, _ = anchor_search(day, fa, fb, ground_fn=lambda la, lo: np.full(len(la), truth[2]))
+    assert ac and all(w.aircraft == ["a1b2c3", "d4e5f6"] for w in ac)
+    lk = rank_locked(day, ac, curves[0], curves[1], np.full(len(ac), truth[2]), c=c)
+    k = int(np.argmin(lk["rms_locked"]))
+    assert lk["rms_locked"][k] < 0.1 and abs(lk["dt_other"][k]) < 0.3
+    assert haversine_m(lk["lat"][k], lk["lon"][k], truth[0], truth[1]) < 100
 
 
 def test_predicted_flight_curves_match_passes():

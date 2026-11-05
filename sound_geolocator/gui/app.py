@@ -641,6 +641,17 @@ def create_app():
         if not S.area or not S.area[0]:
             raise ValueError("run 'Find places that hear the passes' first")
         cands, curves = S.area
+        if request.get_json().get("against", "model") == "model":
+            # compare with each pass's fitted flyover model (smooth, no stray points) over the digitised span
+            from ..doppler import straight_flyover_ratio
+
+            model = []
+            for cv in curves:
+                f = cv.meta["fit"]
+                t = np.arange(np.nanmin(cv.t), np.nanmax(cv.t) + 0.5, 1.0)
+                model.append(DopplerCurve(t=t, f=f["f0"] * straight_flyover_ratio(t, f["t_cpa"], f["speed"], f["d_cpa"]),
+                                          name=cv.name))
+            curves = model
         S.progress = {"stage": "simulating Doppler curves", "fraction": 0.0}
 
         def prog(fr):
