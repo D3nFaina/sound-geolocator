@@ -91,9 +91,10 @@ def fit_flyover(t, f, c=DEFAULT_SPEED_OF_SOUND):
 
     best = None
     for d0 in (300.0, 1000.0, 3000.0, 8000.0):
-        r = least_squares(res, [f0, t[i0], v0, d0], bounds=([0, t[0] - 300, 5, 30], [np.inf, t[-1] + 300, 340, 50000]))
+        r = least_squares(res, [f0, t[i0], v0, d0], bounds=([0, t[0] - 300, 5, 30], [np.inf, t[-1] + 300, 340, 50000]),
+                          loss="soft_l1", f_scale=1.0)  # robust: a few stray points barely matter
         if best is None or r.cost < best.cost:
             best = r
     f0_, tc, v, d = best.x
-    rms = np.sqrt(np.mean(best.fun ** 2))
+    rms = np.sqrt(np.mean(res(best.x) ** 2))
     return {"f0": f0_, "t_cpa": tc, "speed": v, "d_cpa": d, "rms_hz": rms}

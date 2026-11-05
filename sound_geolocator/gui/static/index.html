@@ -58,6 +58,9 @@
   #modelBox p { margin:6px 0; color:#cfd4dd; }
   #modelBox .katex-display { margin:8px 0; overflow-x:auto; overflow-y:hidden; }
   #modelBox .close { position:sticky; top:0; float:right; }
+  .ov { border:1px solid var(--line); border-radius:6px; padding:6px 8px; margin-top:6px; font-size:12px; display:grid; grid-template-columns:auto auto 1fr auto; gap:6px; align-items:start; }
+  .ov .m { color:var(--muted); }
+  .mini { padding:1px 7px; font-size:11px; margin-left:4px; }
   .wc { border:1px solid var(--line); border-radius:6px; padding:6px 8px; margin-top:6px; font-size:12px; cursor:pointer; }
   .wc:hover { border-color:var(--accent); }
   #readout { position:absolute; right:10px; top:52px; background:#000a; padding:3px 8px; border-radius:4px; font:12px ui-monospace, monospace; pointer-events:none; }
@@ -172,6 +175,11 @@
   <div id="result"></div>
   <button id="worldBtn" style="width:100%;margin-top:8px" title="Needs the whole-day archive (step 3) and at least two fitted passes">Search worldwide (whole day, any country)</button>
   <div id="worldRes"></div>
+  <h2><span class="n">5</span>Candidates on the sound map</h2>
+  <p class="sub">Draw the predicted Doppler lines of the real flights for a place and start time on top of the spectrogram, to check them against what you hear. Use the search centre and start time above, or the <b>on spectrogram</b> buttons of a result. Each flight's tone is set from the pass it overlaps best.</p>
+  <button id="predictHere" style="width:100%">Show flights at the search centre</button>
+  <div class="row" style="margin-top:4px"><div><label>within km</label><input id="ovKm" type="number" value="15"></div><div><label class="chk" style="margin-top:22px"><input id="showUnmatched" type="checkbox"> also flights matching no pass</label></div></div>
+  <div id="ovList"></div>
 </aside>
 <main>
   <div id="specwrap">

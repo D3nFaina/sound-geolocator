@@ -58,6 +58,7 @@ class State:
         self.version = 0  # bumped on every change of the curves, so other windows can follow
         self.day = None  # DayArchive
         self.day_build = None  # (path, subprocess) while converting
+        self.overlays = {}  # key -> predicted flight curves for one place and start time
 
     def compute_spec(self):
         p = self.params
@@ -156,7 +157,7 @@ def create_app():
     @app.get("/api/state")
     def state():
         return jsonify(spec=_spec_json() if S.spec is not None else {"loaded": False},
-                       curves=_curves_payload(), version=S.version,
+                       curves=_curves_payload(), version=S.version, overlays=S.overlays,
                        tracks=_tracks_json(), truth=S.truth, day=S.day.summary() if S.day else None)
 
     @app.post("/api/audio")
@@ -174,6 +175,7 @@ def create_app():
             S.audio, S.audio_name = (x, sr), f.filename
             S.params["sr"] = sr
             S.result, S.truth = None, None
+            S.overlays = {}
             _load_fits()
             S.compute_spec()
         return jsonify(spec=_spec_json(), curves=_curves_payload(), fits_file=str(_fits_path()))
@@ -192,6 +194,7 @@ def create_app():
             S.audio, S.audio_name = (x, sr), path.name
             S.params["sr"] = sr
             S.result, S.truth = None, None
+            S.overlays = {}
             _load_fits()
             S.compute_spec()
         return jsonify(spec=_spec_json(), curves=_curves_payload(), fits_file=str(_fits_path()))
@@ -342,7 +345,59 @@ def create_app():
 
     @app.get("/api/curves")
     def get_curves():
-        return jsonify(curves=_curves_payload(), version=S.version)
+        return jsonify(curves=_curves_payload(), version=S.version, overlays=S.overlays)
+
+    # ------------------------------------------------------------------ candidate flights on the spectrogram
+    @app.post("/api/predict")
+    def predict():
+        """Predicted curves of the flights near one place, for one recording start time."""
+        from ..predict import predict_flights
+
+        if S.audio is None:
+            raise ValueError("load a recording first")
+        d = request.get_json()
+        lat, lon = float(d["lat"]), float(d["lon"])
+        t0 = _parse_time(d["start"])
+        alt = float(d.get("alt") or 0)
+        max_km = float(d.get("max_km") or 15)
+        dur = len(S.audio[0]) / S.audio[1]
+        if S.day is not None:
+            tracks = S.day.tracks(t0 - 300, t0 + dur + 300, lat, lon, max_km + 10)
+        else:
+            tracks = S.tracks
+        if not tracks:
+            raise ValueError("no flights: open the day archive or load flight tracks first")
+        S.progress = {"stage": "predicting curves", "fraction": 0.5}
+        flights = predict_flights(tracks, [c for c in S.curves if np.isfinite(c.f).sum() >= 5], lat, lon, alt, t0, dur,
+                                  max_km=max_km)
+        S.progress = {"stage": "done", "fraction": 1.0}
+        for fl in flights:  # compact for the browser
+            step = max(1, len(fl["t"]) // 1500)
+            fl["t"] = [round(float(v), 1) for v in fl["t"][::step]]
+            fl["r"] = [round(float(v), 5) for v in fl["r"][::step]]
+        key = str(d.get("key") or f"{lat:.4f},{lon:.4f},{int(t0)}")
+        with S.lock:
+            S.overlays[key] = {"key": key, "title": d.get("title") or f"{lat:.4f}, {lon:.4f}", "lat": lat, "lon": lon,
+                               "start": _iso(t0), "show": True, "flights": flights}
+            S.version += 1
+        return jsonify(overlays=S.overlays, key=key)
+
+    @app.patch("/api/overlays/<path:key>")
+    def edit_overlay(key):
+        d = request.get_json()
+        with S.lock:
+            ov = S.overlays[key]
+            if "show" in d:
+                ov["show"] = bool(d["show"])
+            S.version += 1
+        return jsonify(overlays=S.overlays)
+
+    @app.delete("/api/overlays/<path:key>")
+    def delete_overlay(key):
+        with S.lock:
+            S.overlays.pop(key, None)
+            S.version += 1
+        return jsonify(overlays=S.overlays)
 
     @app.get("/api/curves.json")
     def export_curves():
@@ -602,6 +657,7 @@ def create_app():
             S.audio, S.audio_name = (x, sr), "synthetic demo"
             S.params.update(sr=4000, fmax=400.0)
             S.curves, S.result = [], None
+            S.overlays = {}
             S.tracks = flights
             S.truth = {"lat": truth[0], "lon": truth[1], "t_start": t0}
             S.compute_spec()

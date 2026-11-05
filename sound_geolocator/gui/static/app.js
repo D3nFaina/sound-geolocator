@@ -29,7 +29,8 @@ const PADCSS = { l: 68, r: 14, t: 12, b: 38 };  // CSS pixels, room for the axis
 const qs = new URLSearchParams(location.search);
 const SOLO = qs.get('solo') === '1';
 if (SOLO) document.body.classList.add('solo');
-let sel = -1, guide = [], knownVersion = -1;
+let sel = -1, guide = [], knownVersion = -1, overlays = {};
+const OCOLORS = ['#ffd166', '#f72585', '#90be6d', '#4895ef', '#f3722c', '#b5179e'];
 function plotRect() { const d = devicePixelRatio; return { x: PADCSS.l * d, y: PADCSS.t * d, w: cv.width - (PADCSS.l + PADCSS.r) * d, h: cv.height - (PADCSS.t + PADCSS.b) * d }; }
 function toTF(px, py) { const p = plotRect(); return { t: view.t0 + (px - p.x) / p.w * (view.t1 - view.t0), f: view.f1 - (py - p.y) / p.h * (view.f1 - view.f0) }; }
 function toXY(t, f) { const p = plotRect(); return { x: p.x + (t - view.t0) / (view.t1 - view.t0) * p.w, y: p.y + (view.f1 - f) / (view.f1 - view.f0) * p.h }; }
@@ -78,6 +79,27 @@ function draw(box) {
     ctx.fillStyle = col;
     c.t.forEach((t, k) => { const q = toXY(t, c.f[k]); ctx.fillRect(q.x - r, q.y - r, 2 * r, 2 * r); });
     if (c.t.length) { const q = toXY(c.t[0], c.f[0]); ctx.textAlign = 'left'; ctx.font = `bold ${12 * dpr}px system-ui`; ctx.fillText(c.name + (c.fit ? '' : ' (not fitted)'), q.x + 4, q.y - 8); }
+  });
+  // predicted lines of candidate flights
+  const refF = (() => { const f = curves.filter((c) => c.fit).map((c) => c.fit.f0).sort((a, b) => a - b); return f.length ? f[f.length >> 1] : 150; })();
+  Object.values(overlays).forEach((ov, oi) => {
+    if (!ov.show) return;
+    const col = OCOLORS[oi % OCOLORS.length];
+    ov.flights.forEach((fl) => {
+      const matched = fl.f0 != null;
+      if (!matched && !$('showUnmatched').checked) return;
+      const f0 = matched ? fl.f0 : refF;
+      ctx.strokeStyle = matched ? col : '#c0c6d0'; ctx.globalAlpha = matched ? 0.95 : 0.55; ctx.lineWidth = 1.3 * dpr;
+      ctx.setLineDash(matched ? [] : [2 * dpr, 3 * dpr]); ctx.beginPath();
+      let prev = null;
+      fl.t.forEach((t, k) => { const q = toXY(t, f0 * fl.r[k]); if (prev != null && t - prev > 3) ctx.moveTo(q.x, q.y); else k ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y); prev = t; });
+      ctx.stroke(); ctx.setLineDash([]);
+      const kc = fl.t.reduce((b, t, k) => (Math.abs(t - fl.t_cpa) < Math.abs(fl.t[b] - fl.t_cpa) ? k : b), 0);
+      const q = toXY(fl.t[kc], f0 * fl.r[kc]);
+      ctx.fillStyle = matched ? col : '#c0c6d0'; ctx.font = `${11 * dpr}px system-ui`; ctx.textAlign = 'left';
+      ctx.fillText(`${fl.label}${matched ? ` → ${fl.match} (${fl.rms_hz.toFixed(1)} Hz)` : ` ${(fl.d_min / 1000).toFixed(1)} km, no pass`}`, q.x + 5, q.y + 14 * dpr);
+      ctx.globalAlpha = 1;
+    });
   });
   // guide being drawn, with the band that will be searched
   if (guide.length) {
@@ -237,7 +259,7 @@ $('popOut').onclick = () => openWindow();
 setInterval(async () => {
   try {
     const r = await api('/api/version');
-    if (knownVersion >= 0 && r.version !== knownVersion) { const j = await api('/api/curves'); knownVersion = j.version; setCurves(j.curves, false); }
+    if (knownVersion >= 0 && r.version !== knownVersion) { const j = await api('/api/curves'); knownVersion = j.version; setCurves(j.curves, false); setOverlays(j.overlays); }
     else knownVersion = r.version;
     if (spec && r.name && r.name !== spec.name) location.reload();
   } catch (e) { }
@@ -288,8 +310,8 @@ layers['Satellite (Esri)'].addTo(map);
 const CAT = { prop: ['Flights: propeller', '#80ed99'], jet: ['Flights: jet', '#c0c6d0'], heli: ['Flights: helicopter', '#ffd166'], unknown: ['Flights: unknown type', '#8a93a3'] };
 const trackLayers = Object.fromEntries(Object.keys(CAT).map((k) => [k, L.layerGroup().addTo(map)]));
 const resultLayer = L.layerGroup().addTo(map), worldLayer = L.layerGroup().addTo(map);
-const overlays = { ...Object.fromEntries(Object.entries(CAT).map(([k, [name, col]]) => [`<span style="color:${col}">━</span> ${name}`, trackLayers[k]])), 'Location result': resultLayer, 'Worldwide candidates': worldLayer };
-L.control.layers(layers, overlays, { position: 'topright', collapsed: false }).addTo(map);
+const mapOverlays = { ...Object.fromEntries(Object.entries(CAT).map(([k, [name, col]]) => [`<span style="color:${col}">━</span> ${name}`, trackLayers[k]])), 'Location result': resultLayer, 'Worldwide candidates': worldLayer };
+L.control.layers(layers, mapOverlays, { position: 'topright', collapsed: false }).addTo(map);
 L.control.scale({ imperial: false }).addTo(map);
 let centerMarker = null, searchBox = null;
 function setCenter(lat, lon) {
@@ -388,9 +410,41 @@ function showResult(r) {
   const rows = r.assignments.map((a) => `<div>${a.curve} → <b>${a.flight}</b>, tone ${a.f_src.toFixed(1)} Hz, misfit ${a.rms_hz.toFixed(2)} Hz${a.time_shift_s ? `, shift ${a.time_shift_s > 0 ? '+' : ''}${a.time_shift_s.toFixed(1)} s` : ''}</div>`).join('');
   (r.candidates || []).slice(1).forEach(([la, lo, co], k) => L.circleMarker([la, lo], { radius: 5, color: '#f8961e' }).bindTooltip(`candidate ${k + 2}: cost ${(co / r.cost).toFixed(1)}× the best`).addTo(resultLayer));
   const others = (r.candidates || []).slice(1).map(([la, lo, co]) => `${la.toFixed(4)}, ${lo.toFixed(4)} (${(co / r.cost).toFixed(1)}×)`).join(' · ');
-  $('result').innerHTML = `<div class="result"><div><b>${r.lat.toFixed(5)}, ${r.lon.toFixed(5)}</b> · <a href="${gmaps(r.lat, r.lon)}" target="_blank">Google Maps</a></div><div>Recording started ${r.t_start_iso} · listener at ${Math.round(r.observer_alt)} m · ${r.n_tracks} flights considered</div>${rows}${others ? `<div class="sub" style="margin-top:4px">Other candidates (cost vs best): ${others}</div>` : ''}${truth}</div>`;
+  $('result').innerHTML = `<div class="result"><div><b>${r.lat.toFixed(5)}, ${r.lon.toFixed(5)}</b> · <a href="${gmaps(r.lat, r.lon)}" target="_blank">Google Maps</a> <button class="mini" id="ovBest">on spectrogram</button></div><div>Recording started ${r.t_start_iso} · listener at ${Math.round(r.observer_alt)} m · ${r.n_tracks} flights considered</div>${rows}${others ? `<div class="sub" style="margin-top:4px">Other candidates (cost vs best): ${others}</div>` : ''}${truth}</div>`;
   map.fitBounds(r.bounds);
+  $('ovBest').onclick = () => predictAt(r.lat, r.lon, r.t_start_iso, `best ${r.lat.toFixed(4)}, ${r.lon.toFixed(4)}`);
+  (r.candidates || []).slice(1).forEach(([la, lo], k) => { const b = document.createElement('button'); b.className = 'mini'; b.textContent = `candidate ${k + 2} on spectrogram`; b.onclick = () => predictAt(la, lo, r.t_start_iso, `candidate ${k + 2}`); $('result').firstChild.appendChild(b); });
 }
+// ---------------------------------------------------------------- candidate flights on the sound map
+function setOverlays(ovs) {
+  overlays = ovs || {}; const box = $('ovList'); box.innerHTML = '';
+  Object.values(overlays).forEach((ov, oi) => {
+    const m = ov.flights.filter((f) => f.f0 != null);
+    const byPass = {}; m.forEach((f) => { if (!byPass[f.match] || f.rms_hz < byPass[f.match].rms_hz) byPass[f.match] = f; });
+    const summary = curves.filter((c) => c.t.length).map((c) => byPass[c.name] ? `${c.name} → <b>${byPass[c.name].label}</b> ${byPass[c.name].type || ''} (${byPass[c.name].rms_hz.toFixed(1)} Hz)` : `${c.name} → <span style="color:#f8961e">nothing</span>`).join('<br>');
+    const div = document.createElement('div'); div.className = 'ov';
+    div.innerHTML = `<input type="checkbox" ${ov.show ? 'checked' : ''}><span class="swatch" style="background:${OCOLORS[oi % OCOLORS.length]};margin-top:3px"></span>
+      <div><b>${ov.title}</b> · start ${ov.start.slice(11, 19)} UTC<div class="m">${ov.flights.length} flights within ${$('ovKm').value} km</div>${summary}</div><button class="x" title="remove">×</button>`;
+    div.querySelector('input').onchange = async (e) => setOverlays((await patch(`/api/overlays/${encodeURIComponent(ov.key)}`, { show: e.target.checked })).overlays);
+    div.querySelector('.x').onclick = async () => setOverlays((await api(`/api/overlays/${encodeURIComponent(ov.key)}`, { method: 'DELETE' })).overlays);
+    box.appendChild(div);
+  });
+  draw();
+}
+async function predictAt(lat, lon, start, title) {
+  status('Predicting the flights\' Doppler lines…', false, true);
+  try {
+    const j = await post('/api/predict', { lat, lon, start, alt: +$('alt').value, max_km: +$('ovKm').value, title });
+    setOverlays(j.overlays); const ov = j.overlays[j.key];
+    status(`${ov.flights.length} flights drawn on the spectrogram (${ov.flights.filter((f) => f.f0 != null).length} match a pass)`);
+  } catch (err) { status(err.message, true); }
+}
+$('predictHere').onclick = () => {
+  if (!$('lat').value || !$('start').value) { status('Set the search centre (click the map) and the recording start first', true); return; }
+  predictAt(+$('lat').value, +$('lon').value, $('start').value, `centre ${(+$('lat').value).toFixed(4)}, ${(+$('lon').value).toFixed(4)}`);
+};
+$('showUnmatched').onchange = () => draw();
+
 // ---------------------------------------------------------------- whole-day worldwide archive
 function showDay(d) {
   if (!d) { $('dayInfo').textContent = ''; return; }
@@ -434,9 +488,10 @@ function showWorld(cs) {
     const lat = c.lat ?? c.vote.lat, lon = c.lon ?? c.vote.lon, iso = c.t_start_iso || c.vote_iso;
     const rel = c.cost != null && best ? (c.cost / best.cost).toFixed(1) + '×' : 'no match';
     const div = document.createElement('div'); div.className = 'wc';
-    div.innerHTML = `<b>#${k + 1}</b> ${lat.toFixed(4)}, ${lon.toFixed(4)} · start ${iso.slice(11, 19)} UTC<br><span class="meta">misfit ${rel} of the best · ${c.vote.busy} low-traffic counts nearby · <a href="${gmaps(lat, lon)}" target="_blank">Google Maps</a></span>`;
+    div.innerHTML = `<b>#${k + 1}</b> ${lat.toFixed(4)}, ${lon.toFixed(4)} · start ${iso.slice(11, 19)} UTC<br><span class="meta">misfit ${rel} of the best · ${c.vote.busy} low-traffic counts nearby · <a href="${gmaps(lat, lon)}" target="_blank">Google Maps</a></span> <button class="mini ovw">on spectrogram</button>`;
     const use = () => { setCenter(lat, lon); $('start').value = iso; $('unc').value = 60; $('radius').value = 8; map.setView([lat, lon], 11); $('dayTracksBtn').click(); };
-    div.onclick = (e) => { if (e.target.tagName !== 'A') use(); };
+    div.querySelector('.ovw').onclick = () => predictAt(lat, lon, iso, `world #${k + 1}`);
+    div.onclick = (e) => { if (e.target.tagName !== 'A' && e.target.tagName !== 'BUTTON') use(); };
     box.appendChild(div);
     L.circleMarker([lat, lon], { radius: k ? 6 : 9, color: k ? '#f8961e' : '#80ed99', weight: 2 }).bindTooltip(`#${k + 1}: ${iso.slice(11, 19)} UTC, misfit ${rel}`).on('click', use).addTo(worldLayer);
   });
@@ -465,13 +520,15 @@ const MODEL = [
   ['h3', '5. Digitising and fitting'],
   ['p', 'Your guide clicks $(t_i, g_i)$ are joined by a monotone spline $g(t)$. In every spectrogram frame only the band $|f - g(t)| \\le w$ is searched ($w$ = the ± Hz box, or 4 % of the frequency), the strongest bin is taken and refined by a parabola through its neighbours:'],
   ['d', '\\hat f_j = f_{b} + \\frac{\\Delta f}{2}\\,\\frac{S_{b-1} - S_{b+1}}{S_{b-1} - 2S_b + S_{b+1}}'],
-  ['p', 'Weak peaks, peaks on the band edge, and points more than 2 Hz off a running median are dropped. Then the four parameters are found by non-linear least squares, started from several distances to avoid a wrong local minimum:'],
+  ['p', 'Weak peaks, peaks on the band edge, and points more than 2 Hz off a running median are dropped. Then the four parameters are found by robust non-linear least squares (soft-L1 loss, so a few stray points barely matter), started from several distances to avoid a wrong local minimum:'],
   ['d', '\\min_{f_0,\\,t_\\mathrm{cpa},\\,v,\\,d}\\ \\sum_j \\big(\\hat f_j - f(t_j;\\,f_0, t_\\mathrm{cpa}, v, d)\\big)^2'],
   ['p', 'The rms residual (Hz) says how well a straight flyover explains the points. A turning or climbing aircraft fits worse.'],
   ['h3', '6. Finding the place'],
   ['p', 'For a candidate listener position $\\mathbf{O}$ (a grid over the search area, with the ground height from a DEM) and recording start $T$, every flight $k$ predicts a curve shape $r_k(t) = c / (c - v_r)$. Each pass $j$ is compared with each flight, solving for its unknown tone in closed form:'],
   ['d', '\\hat f_{0} = \\frac{\\sum_i \\hat f_i\\, r_k(t_i)}{\\sum_i r_k(t_i)^2}, \\qquad \\mathrm{cost}_{jk} = \\frac{\\sqrt{\\tfrac1n \\sum_i (\\hat f_i - \\hat f_0\\, r_k(t_i))^2}}{\\hat f_0}'],
   ['p', 'Flights are first filtered by type (propeller / jet), and by the speed and closest distance fitted in step 5. The passes are locked together: they share one start time $T$, so the fixed gaps between them in the recording (e.g. B and C, 920 s apart) must match the flights. Each pass may shift by a couple of seconds (timing slack) and its tone is free. The total cost over all passes, plus a penalty for loud flights that should have been heard but are not in the recording (silence), is minimised over $(\\mathbf{O}, T)$, first on a coarse grid then refined.'],
+  ['h3', '7. Checking a candidate by eye'],
+  ['p', 'For a chosen place and start time, every flight within the set distance predicts its line $r_k(t)$. For each picked pass it overlaps, its tone is set to $\\hat f_0$ above and the rms misfit is shown; the line is drawn on the spectrogram. A good candidate puts a flight on top of every pass, and puts no loud line where the recording is silent.'],
   ['h3', '7. Worldwide search'],
   ['p', 'Without a known area, every low aircraft sample of the whole day with the right ground speed "votes" for the places abeam of it at up to the fitted distance, and for the start time $T = \\tau_\\text{sample} - t_\\mathrm{cpa}$. Places and times voted by every pass (by different aircraft) are candidates; busy places such as airports, where low aircraft pass all the time, are ranked down because the recording is mostly quiet. The best candidates are then checked with the full curve match above.'],
 ];
@@ -502,7 +559,7 @@ $('demoBtn').onclick = async () => {
 
 // restore state on reload
 (async () => {
-  try { const s = await api('/api/state'); knownVersion = s.version; setCurves(s.curves); if (s.spec.loaded) await setSpec(s.spec); if (!SOLO && s.tracks.length) setTracks(s.tracks); showDay(s.day); } catch (e) { }
+  try { const s = await api('/api/state'); knownVersion = s.version; setCurves(s.curves); setOverlays(s.overlays); if (s.spec.loaded) await setSpec(s.spec); if (!SOLO && s.tracks.length) setTracks(s.tracks); showDay(s.day); } catch (e) { }
 })();
 
 // draggable split between the sound map and the map

@@ -178,3 +178,17 @@ def test_day_archive_and_world_search(tmp_path):
     best = min(cands[:3], key=lambda w: haversine_m(w.lat, w.lon, truth[0], truth[1]))
     assert haversine_m(best.lat, best.lon, truth[0], truth[1]) < 6000
     assert abs(best.t_start - t0) < 60
+
+
+def test_predicted_flight_curves_match_passes():
+    from sound_geolocator.predict import predict_flights
+    from sound_geolocator.synth import demo_scenario, render_recording
+
+    flights, truth, t0 = demo_scenario()
+    x, sr = render_recording(flights[:2], truth, t0, 360.0, sr=4000)
+    sp = enhance(compute_spectrogram(x, sr, fmax=400))
+    cv = clean_curve(track_ridge(sp, 60, 160, 40, 170, name="A"))
+    out = predict_flights(flights, [cv], truth[0], truth[1], truth[2], t0, 360.0, max_km=15)
+    by = {o["ident"]: o for o in out}
+    assert "0f0f0f" not in by  # the far-away distractor is not drawn
+    assert by["a1b2c3"]["match"] == "A" and by["a1b2c3"]["rms_hz"] < 1.5
