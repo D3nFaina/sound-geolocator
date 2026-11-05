@@ -625,29 +625,36 @@ def open_day(path, progress=None, **build_kw) -> DayArchive:
     return DayArchive(out)
 
 
-def refine_world(archive: DayArchive, curves, candidates, n=10, radius_km=6.0, grid_step_m=400.0,
-                 t_uncertainty=90.0, c=340.0, recording_s=None, progress=None, **locate_kw):
-    """Run the full Doppler-curve match around the best world candidates.
+def refine_world(archive: DayArchive, curves, candidates, n=10, radius_km=5.0, grid_step_m=500.0,
+                 t_uncertainty=60.0, c=340.0, recording_s=None, only_matched=True, progress=None, **locate_kw):
+    """Check the best world candidates with the full Doppler-curve match.
 
     Returns a list of (candidate, LocateResult or None) sorted by match cost:
-    the vote count only says "aircraft with the right speed were there", the
-    curve match checks the whole shape of every pass.
+    the vote only says "aircraft with about the right speed and distance were
+    there at the right times"; the curve match checks the whole shape of every
+    pass. With ``only_matched`` (default, fast) only the aircraft that voted
+    for the candidate are used; otherwise every flight nearby (slow).
     """
     from .locate import locate
 
     out = []
+    m = min(n, len(candidates))
+    dur = recording_s or 3600
     for k, cd in enumerate(candidates[:n]):
         if progress:
-            progress(k / max(min(n, len(candidates)), 1))
-        dur = recording_s or 3600
+            progress(k / max(m, 1))
         tracks = archive.tracks(cd.t_start - t_uncertainty - 300, cd.t_start + t_uncertainty + dur + 300,
                                 cd.lat, cd.lon, radius_km + 25)
+        if only_matched:
+            want = {a for a in cd.aircraft if a}
+            tracks = [t for t in tracks if t.ident in want]
         if not tracks:
             out.append((cd, None))
             continue
         try:
             res = locate(curves, tracks, (cd.lat, cd.lon), cd.t_start, t_uncertainty, radius_km, grid_step_m,
-                         c=c, recording_s=recording_s, verbose=False, **locate_kw)
+                         c=c, recording_s=recording_s, verbose=False, fit_gate=False,
+                         **{"dt": 1.0, **locate_kw})
         except Exception:
             res = None
         out.append((cd, res))

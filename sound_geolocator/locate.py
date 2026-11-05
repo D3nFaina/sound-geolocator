@@ -127,11 +127,24 @@ def _score_grid(obs_ecef, curves_rs, tracks, abs_t, n_shift, c, min_coverage=0.8
     fsrc = np.zeros((C, G, n_shift))
     dmin = np.zeros((len(tracks), G))
     t_at = np.zeros((len(tracks), G), dtype=np.int64)
+    # The simulation is only needed where a curve can land (its window plus the
+    # time shifts), and coarsely elsewhere for the silence check. On an
+    # hour-long recording with short passes this is several times faster.
+    T = len(abs_t)
+    need = np.zeros(T, bool)
+    need[::10] = True
+    for k0, f, w in curves_rs:
+        need[k0:k0 + n_shift + len(f) - 1] = True
+    cols = np.nonzero(need)[0]
     for j, tr in enumerate(tracks):
-        R, tau, rng, _ = doppler_ratio(tr, obs_ecef[:, None, :], abs_t[None, :], c, return_extra=True)
-        cov = tr.covered(tau).astype(float)
-        R = np.where(cov > 0, R, 0.0)
-        rng_c = np.where(cov > 0, rng, np.inf)
+        Rn, tau, rngn, _ = doppler_ratio(tr, obs_ecef[:, None, :], abs_t[cols][None, :], c, return_extra=True)
+        covn = tr.covered(tau)
+        R = np.zeros((G, T))
+        cov = np.zeros((G, T))
+        rng_c = np.full((G, T), np.inf)
+        R[:, cols] = np.where(covn, Rn, 0.0)
+        cov[:, cols] = covn
+        rng_c[:, cols] = np.where(covn, rngn, np.inf)
         t_at[j] = np.argmin(rng_c, axis=1)
         dmin[j] = rng_c[np.arange(G), t_at[j]]
         for i, (k0, f, w) in enumerate(curves_rs):
