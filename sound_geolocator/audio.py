@@ -36,12 +36,27 @@ def load_audio(path: str | Path, sr: int | None = 16000, channel: str = "mix"):
     return x.astype(np.float32), int(rate)
 
 
+def _ffmpeg_exe():
+    """ffmpeg on PATH, else the binary bundled with the imageio-ffmpeg package."""
+    exe = shutil.which("ffmpeg")
+    if exe:
+        return exe
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
+
 def _ffmpeg_decode(path: Path, sr: int | None = None, mono: bool = False):
-    if shutil.which("ffmpeg") is None:
-        raise RuntimeError(f"Cannot read {path}: install ffmpeg to load video/compressed audio")
+    exe = _ffmpeg_exe()
+    if exe is None:
+        raise RuntimeError(f"Cannot read {path}: install ffmpeg (or `pip install imageio-ffmpeg`) "
+                           "to load video/compressed audio")
     with tempfile.TemporaryDirectory() as tmp:
         wav = Path(tmp) / "audio.wav"
-        cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", str(path), "-vn", "-acodec", "pcm_s16le"]
+        cmd = [exe, "-nostdin", "-loglevel", "error", "-y", "-i", str(path), "-vn", "-acodec", "pcm_s16le"]
         if mono:
             cmd += ["-ac", "1"]
         if sr:

@@ -31,6 +31,10 @@ The search follows the method described in colsto's video "This background sound
 
 ## GUI
 
+From Spyder or another IDE: open `run_gui.py`, set `CLIP` to your recording and press Run (F5). It installs missing packages on first run and opens the GUI in your browser.
+
+From a terminal:
+
 ```bash
 sgeo gui        # opens http://127.0.0.1:8765
 ```
