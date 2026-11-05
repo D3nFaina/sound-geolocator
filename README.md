@@ -39,7 +39,9 @@ From a terminal:
 sgeo gui        # opens http://127.0.0.1:8765
 ```
 
-Open a recording, click on the falling lines to trace them, load flight tracks, click the map to set the search centre, then press **Find location**. The demo button loads a synthetic case with a known answer. Everything runs locally, and the map tiles are the only thing loaded from the internet.
+Open a recording and zoom into a pass. With **✎ Trace**, click a few points roughly along the falling line and press Enter: only a narrow band around your points is digitised, so the trace can't jump to other lines. Check the dots, remove strays with **⌫ Erase**, then **Fit**. **⧉ New window** opens the current view (or one pass) in its own window, and all windows stay in sync. **∑ Model** explains the equations.
+
+Then load flights (a whole-day archive, see below, or a CSV), click the map to set the search centre and press **Find location**, or press **Search worldwide** to search the whole day without assuming a place. Flight tracks can be switched on and off per aircraft type in the map's layer box. The demo button loads a synthetic case with a known answer. Everything runs locally, and the map tiles are the only thing loaded from the internet.
 
 ![GUI](docs/gui.png)
 
@@ -86,8 +88,12 @@ sgeo locate curves.json tracks.csv --center 45.46,9.19 --radius 25 \
 
 * **OpenSky REST API, recent data only** (`sgeo fetch-opensky --center LAT,LON --start ... --out tracks.csv`). Set `OPENSKY_CLIENT_ID` / `OPENSKY_CLIENT_SECRET` for authenticated access.
 * **OpenSky historical database** (Trino, via `pyopensky`) for older recordings. Export state vectors to CSV.
-* **adsb.lol daily history** (free, ODbL): one release per day at github.com/adsblol/globe_history_YYYY. Download the day's .tar parts, join them (`cat *.tar.a* > day.tar`), and load the .tar or its extracted folder in the GUI (step 3) or with `sound_geolocator.flights.load_readsb_history`. ADS-B Exchange historical data uses the same format.
+* **adsb.lol daily history** (free, ODbL): one release per day at github.com/adsblol/globe_history_YYYY (`vYYYY.MM.DD-planes-readsb-prod-0`, about 4 GB in `.tar.aa`, `.tar.ab` parts). Put the parts side by side and open the `.tar.aa` in the GUI (step 3, *Whole day, worldwide*): it is converted once into a compact `.sgday` folder (airborne points below 7 km, every 3 s or more; about 0.8 GB and 2 to 3 minutes for a whole day), then opens instantly. From a terminal: `python -m sound_geolocator.adsb_day build v….tar.aa`. The conversion is resumable (`--budget SECONDS`). ADS-B Exchange historical data uses the same format.
 * Any CSV with the columns above.
+
+### Worldwide search
+
+With a whole day loaded and two or more fitted passes, **Search worldwide** (or `DayArchive.search_world`) needs no search area. Every low aircraft sample with the right ground speed votes for the places abeam of it at about the fitted distance, and for the recording start time that would put the pass at the right moment. Places and times where different aircraft match every pass are candidates. Places with a lot of low traffic (airports) rank lower, because a mostly quiet recording can't have been made there. The best candidates are then checked with the full curve match (`refine_world`). Treat the result as a short list to inspect, not a final answer.
 
 Use tracks covering a few minutes before and after the recording. The sound heard at time *t* was emitted up to a minute earlier.
 
@@ -104,9 +110,10 @@ Use tracks covering a few minutes before and after the recording. The sound hear
 |---|---|
 | `audio.py` | load audio/video, resample |
 | `spectrogram.py` | STFT, hum removal, whitening, despeckling |
-| `extract.py` | ridge tracking (box or seed), curve cleaning, JSON I/O |
+| `extract.py` | digitising along a guide, ridge tracking (box or seed), curve cleaning, JSON I/O |
 | `doppler.py` | retarded-time Doppler simulation, straight-flyover fit |
-| `flights.py` | track model (smoothing spline in ECEF), CSV/OpenSky loaders |
+| `flights.py` | track model (smoothing spline in ECEF), CSV/OpenSky/readsb loaders |
+| `adsb_day.py` | whole-day worldwide archive: conversion, area queries, worldwide search |
 | `locate.py` | position × start-time search: locked multi-event scoring, gates, silence check |
 | `aircraft_types.py` | ICAO type code → propeller / jet / helicopter |
 | `elevation.py` | DEM from OpenTopoData, GeoTIFF or .npz |

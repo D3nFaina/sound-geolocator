@@ -19,7 +19,8 @@ from flask import Flask, jsonify, request, send_file, send_from_directory
 
 from ..audio import load_audio
 from ..doppler import fit_flyover
-from ..extract import DopplerCurve, clean_curve, load_curves, save_curves, trace_from_seed, track_ridge
+from ..extract import (DopplerCurve, clean_curve, digitise_along, load_curves, save_curves, trace_from_seed,
+                       track_ridge)
 from ..flights import Track, fetch_opensky_states, load_tracks
 from ..spectrogram import compute_spectrogram, enhance
 
@@ -54,6 +55,9 @@ class State:
         self.clim = {}
         self.progress = {"stage": "idle", "fraction": 0.0}
         self.dem_file = None
+        self.version = 0  # bumped on every change of the curves, so other windows can follow
+        self.day = None  # DayArchive
+        self.day_build = None  # (path, subprocess) while converting
 
     def compute_spec(self):
         p = self.params
@@ -85,9 +89,10 @@ def _curve_json(cv: DopplerCurve, i: int):
     ok = np.isfinite(cv.f)
     info = {"name": cv.name or f"curve{i}", "t": [round(float(v), 3) for v in cv.t[ok]],
             "f": [round(float(v), 3) for v in cv.f[ok]], "n": int(ok.sum()),
-            "show": cv.meta.get("show", True), "use": cv.meta.get("use", True)}
+            "show": cv.meta.get("show", True), "use": cv.meta.get("use", True),
+            "guide": [cv.meta["guide_t"], cv.meta["guide_f"]] if "guide_t" in cv.meta else None}
     fit = cv.meta.get("fit")
-    if fit is None:
+    if fit is None and "fitted" not in cv.meta:  # curves saved by older versions: fit on the fly
         try:
             fit = {k: float(v) for k, v in fit_flyover(cv.t, cv.f).items()}
         except Exception:
@@ -111,6 +116,7 @@ def _fits_path():
 
 
 def _save_fits():
+    S.version += 1
     if S.audio_name:
         save_curves(S.curves, _fits_path())
 
@@ -150,8 +156,8 @@ def create_app():
     @app.get("/api/state")
     def state():
         return jsonify(spec=_spec_json() if S.spec is not None else {"loaded": False},
-                       curves=_curves_payload(),
-                       tracks=_tracks_json(), truth=S.truth)
+                       curves=_curves_payload(), version=S.version,
+                       tracks=_tracks_json(), truth=S.truth, day=S.day.summary() if S.day else None)
 
     @app.post("/api/audio")
     def upload_audio():
@@ -261,18 +267,21 @@ def create_app():
         d = request.get_json()
         name = d.get("name") or f"pass {len(S.curves) + 1}"
         rise = None if d.get("allow_rise") else 0.5
-        if d["mode"] == "seed":
+        if d["mode"] == "guide":
+            cv = digitise_along(S.spec, d["t"], d["f"], halfwidth_hz=float(d["width"]) if d.get("width") else None,
+                                name=name)
+        elif d["mode"] == "seed":
             t = float(d["t"])
             tmin = max(t - 180, d["tmin"]) if d.get("tmin") is not None else t - 180
             tmax = min(t + 180, d["tmax"]) if d.get("tmax") is not None else t + 180
-            cv = trace_from_seed(S.spec, t, float(d["f"]), tmin, tmax,
-                                 max_rise_hz_s=rise, name=name)
+            cv = clean_curve(trace_from_seed(S.spec, t, float(d["f"]), tmin, tmax, max_rise_hz_s=rise, name=name))
         else:
-            cv = track_ridge(S.spec, float(d["f0"]), float(d["f1"]), float(d["t0"]), float(d["t1"]),
-                             max_rise_hz_s=rise, name=name)
-        cv = clean_curve(cv)
+            cv = clean_curve(track_ridge(S.spec, float(d["f0"]), float(d["f1"]), float(d["t0"]), float(d["t1"]),
+                                         max_rise_hz_s=rise, name=name))
         if np.isfinite(cv.f).sum() < 10:
-            raise ValueError("no clear line found there; try clicking right on a bright line")
+            raise ValueError("no clear line found there: click a few points right on a bright line")
+        cv.meta["fitted"] = False
+        cv.meta["fit"] = None
         with S.lock:
             S.curves.append(cv)
             _save_fits()
@@ -297,6 +306,43 @@ def create_app():
                     cv.meta[k] = bool(d[k])
             _save_fits()
         return jsonify(curves=_curves_payload())
+
+    @app.post("/api/curves/<int:i>/fit")
+    def fit_curve(i):
+        """Fit the flyover model to the digitised points of one curve."""
+        with S.lock:
+            cv = S.curves[i]
+            ok = np.isfinite(cv.f)
+            if ok.sum() < 8:
+                raise ValueError("too few points to fit")
+            cv.meta["fit"] = {k: float(v) for k, v in fit_flyover(cv.t, cv.f).items()}
+            cv.meta["fitted"] = True
+            _save_fits()
+        return jsonify(curves=_curves_payload())
+
+    @app.post("/api/curves/<int:i>/erase")
+    def erase_points(i):
+        """Remove the digitised points of one curve inside a box (the fit has to be redone)."""
+        d = request.get_json()
+        with S.lock:
+            cv = S.curves[i]
+            m = (cv.t >= float(d["t0"])) & (cv.t <= float(d["t1"])) & (cv.f >= float(d["f0"])) & (cv.f <= float(d["f1"]))
+            if not m.any():
+                return jsonify(curves=_curves_payload(), removed=0)
+            cv.f = cv.f.copy()
+            cv.f[m] = np.nan
+            cv.meta["fit"] = None
+            cv.meta["fitted"] = False
+            _save_fits()
+        return jsonify(curves=_curves_payload(), removed=int(m.sum()))
+
+    @app.get("/api/version")
+    def version():
+        return jsonify(version=S.version, name=S.audio_name)
+
+    @app.get("/api/curves")
+    def get_curves():
+        return jsonify(curves=_curves_payload(), version=S.version)
 
     @app.get("/api/curves.json")
     def export_curves():
@@ -359,6 +405,106 @@ def create_app():
         cache = Path.home() / ".sound_geolocator" / "tracks_last.csv"
         save_tracks_csv(tracks, cache)
         return jsonify(tracks=_tracks_json(), saved=str(cache))
+
+    # ------------------------------------------------------------------ whole-day worldwide archive
+    def _day_json():
+        if S.day is None:
+            return None
+        return S.day.summary()
+
+    @app.post("/api/day/open")
+    def day_open():
+        """Open a converted day (.sgday), or start converting the tar parts (in a separate process)."""
+        import subprocess
+        import sys
+
+        from ..adsb_day import DayArchive, build_progress, sgday_path
+
+        src = Path(request.get_json()["path"].strip().replace("\\ ", " ")).expanduser()
+        out = sgday_path(src)
+        if (out / "aircraft.json").exists():
+            S.day = DayArchive(out)
+            return jsonify(day=_day_json())
+        if not src.exists():
+            raise ValueError(f"not found: {src}")
+        if S.day_build is None or S.day_build[1].poll() is not None:
+            root = Path(__file__).resolve().parents[2]
+            proc = subprocess.Popen([sys.executable, "-m", "sound_geolocator.adsb_day", "build", str(src)], cwd=root)
+            S.day_build = (out, proc)
+        return jsonify(building=True, progress=build_progress(out))
+
+    @app.get("/api/day/status")
+    def day_status():
+        from ..adsb_day import DayArchive, build_progress
+
+        if S.day is not None and S.day_build is None:
+            return jsonify(day=_day_json())
+        if S.day_build is None:
+            return jsonify(day=None)
+        out, proc = S.day_build
+        pr = build_progress(out)
+        if pr["done"]:
+            S.day, S.day_build = DayArchive(out), None
+            return jsonify(day=_day_json())
+        if proc.poll() is not None:
+            S.day_build = None
+            raise ValueError("the conversion stopped; open the day again to resume it")
+        return jsonify(building=True, progress=pr)
+
+    @app.post("/api/day/tracks")
+    def day_tracks():
+        """Flights from the day archive around the search centre and time."""
+        if S.day is None:
+            raise ValueError("open the day archive first")
+        d = request.get_json()
+        t0 = _parse_time(d["start"])
+        unc = float(d.get("uncertainty", 300))
+        dur = len(S.audio[0]) / S.audio[1] if S.audio else 3600
+        tracks = S.day.tracks(t0 - unc - 300, t0 + unc + dur + 300, float(d["lat"]), float(d["lon"]),
+                              float(d.get("radius", 40)))
+        with S.lock:
+            S.tracks = tracks
+        return jsonify(tracks=_tracks_json())
+
+    @app.post("/api/day/search")
+    def day_search():
+        """Where on Earth and when: vote with every fitted pass, then match the curves at the best places."""
+        from ..adsb_day import refine_world
+
+        if S.day is None:
+            raise ValueError("open the day archive first")
+        d = request.get_json()
+        curves = [c for c in S.curves if c.meta.get("use", True) and c.meta.get("fit")]
+        if len(curves) < 2:
+            raise ValueError("fit at least two passes (and tick 'use') for a worldwide search")
+        types = d.get("types")
+        passes = [dict(c.meta["fit"], types=types) for c in curves]
+        S.progress = {"stage": "worldwide vote", "fraction": 0.0}
+
+        def prog_v(fr):
+            S.progress = {"stage": "worldwide vote", "fraction": round(fr * 0.3, 3)}
+
+        cands = S.day.search_world(passes, speed_tol=float(d.get("speed_tol", 0.4)), n_best=int(d.get("n_votes", 40)),
+                                   c=float(d.get("c", 340)), progress=prog_v)
+        if not cands:
+            S.progress = {"stage": "done", "fraction": 1.0}
+            return jsonify(candidates=[])
+
+        def prog_r(fr):
+            S.progress = {"stage": "matching curves at the best places", "fraction": round(0.3 + 0.7 * fr, 3)}
+
+        rec_s = len(S.audio[0]) / S.audio[1] if S.audio else None
+        res = refine_world(S.day, curves, cands, n=int(d.get("n_refine", 8)), c=float(d.get("c", 340)),
+                           recording_s=rec_s, progress=prog_r)
+        S.progress = {"stage": "done", "fraction": 1.0}
+        out = []
+        for cd, r in res:
+            item = {"vote": cd.to_json(), "vote_iso": _iso(cd.t_start)}
+            if r is not None:
+                item.update(lat=r.lat, lon=r.lon, t_start=r.t_start, t_start_iso=_iso(r.t_start), cost=r.cost,
+                            assignments=[a.__dict__ for a in r.assignments])
+            out.append(item)
+        return jsonify(candidates=out)
 
     @app.post("/api/tracks/opensky")
     def opensky():

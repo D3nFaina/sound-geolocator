@@ -232,3 +232,59 @@ def trace_from_seed(spec: Spectrogram, t_seed: float, f_seed: float, tmin: float
     sl = slice(a, b + 1)
     meta = dict(c.meta, seed=[t_seed, f_seed])
     return DopplerCurve(c.t[sl], c.f[sl], c.strength[sl], name, meta)
+
+
+def digitise_along(spec: Spectrogram, guide_t, guide_f, halfwidth_hz: float | None = None,
+                   rel_width: float = 0.04, min_strength_db: float = 3.0, clean_hz: float = 2.0,
+                   name: str = "") -> DopplerCurve:
+    """Digitise one Doppler line inside a corridor around a hand-drawn guide.
+
+    ``guide_t``/``guide_f`` are a few points clicked roughly along the line
+    (at least 2). The guide is interpolated smoothly (monotone PCHIP) over
+    every spectrogram frame between its first and last point. In each frame
+    only the bins within ``halfwidth_hz`` of the guide (default
+    ``rel_width`` × frequency, at least 2 bins) are looked at, and the
+    strongest one is taken, refined to sub-bin accuracy. Frames where the
+    peak is weak, or sits on the edge of the corridor (meaning the line left
+    it), are left empty, and then points more than ``clean_hz`` off a
+    running median are dropped. Nothing outside the corridor can be picked,
+    so the result can't wander onto another line.
+    """
+    from scipy.interpolate import PchipInterpolator
+
+    gt = np.asarray(guide_t, float)
+    gf = np.asarray(guide_f, float)
+    o = np.argsort(gt)
+    gt, gf = gt[o], gf[o]
+    keep = np.concatenate([[True], np.diff(gt) > 1e-6])
+    gt, gf = gt[keep], gf[keep]
+    if len(gt) < 2:
+        raise ValueError("click at least two points along the line")
+    sub = spec.window(gt[0], gt[-1])
+    times, freqs, S = sub.times, sub.freqs, sub.power_db
+    if len(times) < 3:
+        raise ValueError("the guide is too short")
+    fg = PchipInterpolator(gt, gf)(times) if len(gt) > 2 else np.interp(times, gt, gf)
+    df = float(np.median(np.diff(freqs)))
+    hw = np.full_like(fg, halfwidth_hz) if halfwidth_hz else rel_width * fg
+    hw = np.maximum(hw, 2 * df)
+    f = np.full(len(times), np.nan)
+    strength = np.full(len(times), np.nan)
+    for j in range(len(times)):
+        lo = int(np.searchsorted(freqs, fg[j] - hw[j]))
+        hi = int(np.searchsorted(freqs, fg[j] + hw[j], side="right"))
+        if hi - lo < 3:
+            continue
+        col = S[lo:hi, j]
+        b = int(np.argmax(col))
+        strength[j] = col[b]
+        if b == 0 or b == len(col) - 1 or col[b] < min_strength_db:
+            continue
+        y0, y1, y2 = col[b - 1], col[b], col[b + 1]
+        den = y0 - 2 * y1 + y2
+        delta = 0.5 * (y0 - y2) / den if den < 0 else 0.0
+        f[j] = freqs[lo + b] + np.clip(delta, -0.5, 0.5) * df
+    cv = DopplerCurve(times.copy(), f, strength, name,
+                      {"guide_t": [float(x) for x in gt], "guide_f": [float(x) for x in gf],
+                       "halfwidth_hz": halfwidth_hz, "rel_width": rel_width, "method": "guide"})
+    return clean_curve(cv, max_dev_hz=clean_hz) if clean_hz else cv

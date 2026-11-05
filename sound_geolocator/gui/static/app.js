@@ -25,8 +25,12 @@ const gmaps = (lat, lon) => `https://www.google.com/maps/search/?api=1&query=${l
 
 // ---------------------------------------------------------------- spectrogram canvas
 const cv = $('spec'), ctx = cv.getContext('2d');
-const PAD = { l: 58, r: 12, t: 10, b: 32 };
-function plotRect() { return { x: PAD.l, y: PAD.t, w: cv.width - PAD.l - PAD.r, h: cv.height - PAD.t - PAD.b }; }
+const PADCSS = { l: 68, r: 14, t: 12, b: 38 };  // CSS pixels, room for the axis labels
+const qs = new URLSearchParams(location.search);
+const SOLO = qs.get('solo') === '1';
+if (SOLO) document.body.classList.add('solo');
+let sel = -1, guide = [], knownVersion = -1;
+function plotRect() { const d = devicePixelRatio; return { x: PADCSS.l * d, y: PADCSS.t * d, w: cv.width - (PADCSS.l + PADCSS.r) * d, h: cv.height - (PADCSS.t + PADCSS.b) * d }; }
 function toTF(px, py) { const p = plotRect(); return { t: view.t0 + (px - p.x) / p.w * (view.t1 - view.t0), f: view.f1 - (py - p.y) / p.h * (view.f1 - view.f0) }; }
 function toXY(t, f) { const p = plotRect(); return { x: p.x + (t - view.t0) / (view.t1 - view.t0) * p.w, y: p.y + (view.f1 - f) / (view.f1 - view.f0) * p.h }; }
 function fmtT(t, step) {
@@ -38,6 +42,7 @@ function fmtT(t, step) {
 function niceTime(range, n) { const r = range / n; for (const k of [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600]) if (k >= r) return k; return 3600; }
 function niceStep(range, n) { const r = range / n, m = Math.pow(10, Math.floor(Math.log10(r))); for (const k of [1, 2, 5, 10]) if (k * m >= r) return k * m; }
 function evXY(e) { const r = cv.getBoundingClientRect(); return { x: (e.clientX - r.left) * devicePixelRatio, y: (e.clientY - r.top) * devicePixelRatio }; }
+const bandHalf = (f) => { const w = +$('bandW').value; return w > 0 ? w : Math.max(0.04 * f, 2); };
 
 function resize() { const r = cv.getBoundingClientRect(); cv.width = r.width * devicePixelRatio; cv.height = r.height * devicePixelRatio; draw(); if (spec) scheduleTile(); }
 function draw(box) {
@@ -48,27 +53,43 @@ function draw(box) {
   ctx.save(); ctx.beginPath(); ctx.rect(p.x, p.y, p.w, p.h); ctx.clip();
   if (img) { const a = toXY(imgExt[0], imgExt[3]), b = toXY(imgExt[1], imgExt[2]); ctx.imageSmoothingEnabled = false; ctx.drawImage(img, a.x, a.y, b.x - a.x, b.y - a.y); }
   ctx.restore();
-  // axes
-  ctx.strokeStyle = '#ffffff22'; ctx.fillStyle = '#9aa3b2'; ctx.font = `${11 * dpr}px system-ui`; ctx.lineWidth = 1;
-  const ts = niceTime(view.t1 - view.t0, 10), fs = niceStep(view.f1 - view.f0, 6);
-  ctx.textAlign = 'center';
-  for (let t = Math.ceil(view.t0 / ts) * ts; t <= view.t1; t += ts) { const { x } = toXY(t, 0); ctx.beginPath(); ctx.moveTo(x, p.y); ctx.lineTo(x, p.y + p.h); ctx.stroke(); ctx.fillText(fmtT(t, ts), x, p.y + p.h + 18 * dpr); }
-  ctx.textAlign = 'right';
-  for (let f = Math.ceil(view.f0 / fs) * fs; f <= view.f1; f += fs) { const { y } = toXY(0, f); ctx.beginPath(); ctx.moveTo(p.x, y); ctx.lineTo(p.x + p.w, y); ctx.stroke(); ctx.fillText(+f.toFixed(1) + ' Hz', p.x - 6, y + 4); }
-  // fits
+  // axes: labels sit in the margins, outside the plot
+  ctx.strokeStyle = '#ffffff22'; ctx.fillStyle = '#c3c9d4'; ctx.font = `${11 * dpr}px system-ui`; ctx.lineWidth = 1;
+  const ts = niceTime(view.t1 - view.t0, Math.max(3, p.w / dpr / 90)), fs = niceStep(view.f1 - view.f0, Math.max(3, p.h / dpr / 45));
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  for (let t = Math.ceil(view.t0 / ts) * ts; t <= view.t1; t += ts) { const { x } = toXY(t, 0); ctx.beginPath(); ctx.moveTo(x, p.y); ctx.lineTo(x, p.y + p.h); ctx.stroke(); ctx.fillText(fmtT(t, ts), x, p.y + p.h + 6 * dpr); }
+  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  for (let f = Math.ceil(view.f0 / fs) * fs; f <= view.f1; f += fs) { const { y } = toXY(0, f); ctx.beginPath(); ctx.moveTo(p.x, y); ctx.lineTo(p.x + p.w, y); ctx.stroke(); ctx.fillText(+f.toFixed(1) + ' Hz', p.x - 6 * dpr, y); }
+  ctx.textAlign = 'left'; ctx.textBaseline = 'bottom'; ctx.fillStyle = '#9aa3b2';
+  ctx.fillText(spec.t1 < 600 ? 'time' : 'time (min:s)', p.x, H - 2 * dpr);
+  ctx.textBaseline = 'alphabetic';
+  // curves
   ctx.save(); ctx.beginPath(); ctx.rect(p.x, p.y, p.w, p.h); ctx.clip();
   if ($('showFits').checked) curves.forEach((c, i) => {
-    if (!c.show) return;
-    const col = COLORS[i % COLORS.length];
+    if (!c.show && i !== sel) return;
+    const col = COLORS[i % COLORS.length], isSel = i === sel;
     if ($('showModel').checked && c.model_t) {
-      ctx.strokeStyle = col; ctx.globalAlpha = 0.9; ctx.lineWidth = 1.2 * dpr; ctx.setLineDash([6 * dpr, 4 * dpr]); ctx.beginPath();
+      ctx.strokeStyle = col; ctx.globalAlpha = 0.95; ctx.lineWidth = (isSel ? 1.8 : 1.2) * dpr; ctx.setLineDash([6 * dpr, 4 * dpr]); ctx.beginPath();
       c.model_t.forEach((t, k) => { const q = toXY(t, c.model_f[k]); k ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y); });
       ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
     }
-    ctx.fillStyle = col; const r = 1.4 * dpr;
+    const r = (isSel ? 2.2 : 1.4) * dpr;
+    if (isSel) { ctx.fillStyle = '#000'; c.t.forEach((t, k) => { const q = toXY(t, c.f[k]); ctx.fillRect(q.x - r - dpr, q.y - r - dpr, 2 * r + 2 * dpr, 2 * r + 2 * dpr); }); }
+    ctx.fillStyle = col;
     c.t.forEach((t, k) => { const q = toXY(t, c.f[k]); ctx.fillRect(q.x - r, q.y - r, 2 * r, 2 * r); });
-    const q = toXY(c.t[0], c.f[0]); ctx.textAlign = 'left'; ctx.font = `bold ${12 * dpr}px system-ui`; ctx.fillText(c.name, q.x + 4, q.y - 8);
+    if (c.t.length) { const q = toXY(c.t[0], c.f[0]); ctx.textAlign = 'left'; ctx.font = `bold ${12 * dpr}px system-ui`; ctx.fillText(c.name + (c.fit ? '' : ' (not fitted)'), q.x + 4, q.y - 8); }
   });
+  // guide being drawn, with the band that will be searched
+  if (guide.length) {
+    const g = [...guide].sort((a, b) => a.t - b.t);
+    ctx.fillStyle = '#ffffff18'; ctx.beginPath();
+    g.forEach((q, k) => { const a = toXY(q.t, q.f + bandHalf(q.f)); k ? ctx.lineTo(a.x, a.y) : ctx.moveTo(a.x, a.y); });
+    [...g].reverse().forEach((q) => { const a = toXY(q.t, q.f - bandHalf(q.f)); ctx.lineTo(a.x, a.y); });
+    ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.2 * dpr; ctx.beginPath();
+    g.forEach((q, k) => { const a = toXY(q.t, q.f); k ? ctx.lineTo(a.x, a.y) : ctx.moveTo(a.x, a.y); }); ctx.stroke();
+    ctx.fillStyle = '#fff'; g.forEach((q) => { const a = toXY(q.t, q.f); ctx.beginPath(); ctx.arc(a.x, a.y, 3.5 * dpr, 0, 7); ctx.fill(); });
+  }
   if (box) { ctx.strokeStyle = box.color || '#fff'; ctx.lineWidth = 1.5 * dpr; ctx.setLineDash([5, 4]); ctx.strokeRect(box.x, box.y, box.w, box.h); ctx.setLineDash([]); }
   ctx.restore();
 }
@@ -92,27 +113,65 @@ function clampView() {
 function setView(v, remember = true) { if (remember && view) { history.push({ ...view }); if (history.length > 50) history.shift(); } view = v; clampView(); draw(); scheduleTile(); }
 async function setSpec(s, keepView = false) {
   const old = view; spec = s; history = [];
-  view = keepView && old ? old : { t0: s.t0, t1: s.t1, f0: s.f0, f1: s.f1 }; clampView();
+  view = keepView && old ? old : { t0: s.t0, t1: s.t1, f0: s.f0, f1: s.f1 };
+  const v = qs.get('v'); if (v && !keepView) { const [a, b, c, d] = v.split(',').map(Number); view = { t0: a, t1: b, f0: c, f1: d }; }
+  clampView();
   $('audioName').textContent = `${s.name} · ${(s.duration / 60).toFixed(1)} min`;
   $('fmin').value = s.params.fmin; $('fmax').value = s.params.fmax; $('win').value = s.params.window;
   $('hint').textContent = '';
+  if (SOLO) document.title = `Sound Geolocator · ${fmtT(view.t0, 1)}–${fmtT(view.t1, 1)}`;
   img = null; draw(); await loadImage();
 }
 
 // tools
-function setTool(t) { tool = t; for (const [id, n] of [['tZoom', 'zoom'], ['tPan', 'pan'], ['tFit', 'fit']]) $(id).classList.toggle('on', n === t); cv.style.cursor = t === 'pan' ? 'grab' : 'crosshair'; }
-$('tZoom').onclick = () => setTool('zoom'); $('tPan').onclick = () => setTool('pan'); $('tFit').onclick = () => setTool('fit');
+const TOOLS = [['tZoom', 'zoom'], ['tPan', 'pan'], ['tTrace', 'trace'], ['tErase', 'erase']];
+function setTool(t) {
+  if (t !== 'trace' && guide.length) { guide = []; draw(); }
+  tool = t; for (const [id, n] of TOOLS) $(id).classList.toggle('on', n === t);
+  cv.style.cursor = t === 'pan' ? 'grab' : t === 'erase' ? 'cell' : 'crosshair';
+  const hints = { trace: 'Click points along one line, then Enter or double-click. Esc cancels, Backspace removes the last point.', erase: sel >= 0 ? `Drag a box over stray points of ${curves[sel].name}` : 'Select a pass in the list first' };
+  $('hint').textContent = spec ? (hints[t] || '') : $('hint').textContent;
+}
+for (const [id, n] of TOOLS) $(id).onclick = () => setTool(n);
 $('zBack').onclick = () => { if (history.length) setView(history.pop(), false); };
 $('zReset').onclick = () => spec && setView({ t0: spec.t0, t1: spec.t1, f0: spec.f0, f1: spec.f1 });
-$('showFits').onchange = () => draw(); $('showModel').onchange = () => draw();
+$('showFits').onchange = () => draw(); $('showModel').onchange = () => draw(); $('bandW').oninput = () => draw();
+$('fitSel').onclick = () => fitCurve(sel);
 window.addEventListener('keydown', (e) => {
-  if (e.target.tagName === 'INPUT') return;
-  if (e.key === 'z') setTool('zoom'); else if (e.key === 'h') setTool('pan'); else if (e.key === 'f') setTool('fit');
-  else if (e.key === 'Backspace') { e.preventDefault(); $('zBack').click(); } else if (e.key === '0') $('zReset').click();
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  if (e.key === 'Escape') { guide = []; draw(); $('modelBox').style.display = 'none'; return; }
+  if (e.key === 'Enter') { e.preventDefault(); if (guide.length) finishGuide(); else if (sel >= 0) fitCurve(sel); return; }
+  if (e.key === 'Backspace') { e.preventDefault(); if (guide.length) { guide.pop(); draw(); } else $('zBack').click(); return; }
+  const k = e.key.toLowerCase();
+  if (k === 'z') setTool('zoom'); else if (k === 'h') setTool('pan'); else if (k === 't' || k === 'f') setTool('trace'); else if (k === 'e') setTool('erase');
+  else if (e.key === '0') $('zReset').click();
 });
 
+async function finishGuide() {
+  const g = guide.filter((q, k) => k === 0 || Math.abs(q.t - guide[k - 1].t) > 1e-3 || Math.abs(q.f - guide[k - 1].f) > 1e-3);
+  guide = []; draw();
+  if (g.length < 2) { status('Click at least two points along the line', true); return; }
+  status('Digitising the line along your points…', false, true);
+  try {
+    const w = +$('bandW').value;
+    const j = await post('/api/curves', { mode: 'guide', t: g.map((q) => q.t), f: g.map((q) => q.f), width: w > 0 ? w : null });
+    sel = j.curves.length - 1; setCurves(j.curves);
+    const c = curves[sel];
+    status(`${c.name}: ${c.n} points digitised. Check they sit on the line (Erase removes strays), then press Fit or Enter.`);
+  } catch (err) { status(err.message, true); }
+}
+async function fitCurve(i) {
+  if (i < 0 || !curves[i]) { status('Select a pass in the list first', true); return; }
+  status(`Fitting ${curves[i].name}…`, false, true);
+  try {
+    const j = await post(`/api/curves/${i}/fit`, {}); setCurves(j.curves);
+    const c = curves[i];
+    status(`${c.name}: closest at ${fmtT(c.fit.t_cpa, 0.1)}, ${Math.round(c.fit.speed)} m/s, ${(c.fit.d_cpa / 1000).toFixed(2)} km, tone ${c.fit.f0} Hz (fit rms ${c.fit.rms_hz} Hz)`);
+  } catch (err) { status(err.message, true); }
+}
+
 let drag = null;
-cv.addEventListener('mousedown', (e) => { if (!spec || e.button !== 0) return; const q = evXY(e); drag = { x0: q.x, y0: q.y, moved: false, v0: { ...view }, mode: (e.shiftKey && tool !== 'pan') ? 'fit' : tool }; if (drag.mode === 'pan') cv.style.cursor = 'grabbing'; });
+cv.addEventListener('mousedown', (e) => { if (!spec || e.button !== 0) return; const q = evXY(e); drag = { x0: q.x, y0: q.y, moved: false, v0: { ...view }, mode: (e.shiftKey && tool !== 'pan') ? 'trace' : tool }; if (drag.mode === 'pan') cv.style.cursor = 'grabbing'; });
 window.addEventListener('mousemove', (e) => {
   if (!spec) return;
   const { x, y } = evXY(e);
@@ -123,30 +182,27 @@ window.addEventListener('mousemove', (e) => {
   if (drag.mode === 'pan') {
     const p = plotRect(); const dt = (x - drag.x0) / p.w * (drag.v0.t1 - drag.v0.t0), df = (y - drag.y0) / p.h * (drag.v0.f1 - drag.v0.f0);
     view = { t0: drag.v0.t0 - dt, t1: drag.v0.t1 - dt, f0: drag.v0.f0 + df, f1: drag.v0.f1 + df }; clampView(); draw(); scheduleTile();
-  } else draw({ x: Math.min(x, drag.x0), y: Math.min(y, drag.y0), w: Math.abs(x - drag.x0), h: Math.abs(y - drag.y0), color: drag.mode === 'fit' ? '#80ed99' : '#fff' });
+  } else draw({ x: Math.min(x, drag.x0), y: Math.min(y, drag.y0), w: Math.abs(x - drag.x0), h: Math.abs(y - drag.y0), color: { trace: '#80ed99', erase: '#f72585' }[drag.mode] || '#fff' });
 });
 window.addEventListener('mouseup', async (e) => {
   if (!drag) return; const d = drag; drag = null; setTool(tool);
   const { x, y } = evXY(e);
   if (d.mode === 'pan') { if (d.moved) { history.push(d.v0); } return; }
   const a = toTF(Math.min(x, d.x0), Math.min(y, d.y0)), b = toTF(Math.max(x, d.x0), Math.max(y, d.y0));
-  if (d.mode === 'zoom') {
-    if (d.moved) setView({ t0: a.t, t1: b.t, f0: b.f, f1: a.f });
-    else { draw(); }
+  if (d.mode === 'zoom') { if (d.moved) setView({ t0: a.t, t1: b.t, f0: b.f, f1: a.f }); else draw(); return; }
+  if (d.mode === 'erase') {
+    if (!d.moved) { draw(); return; }
+    if (sel < 0) { status('Select a pass in the list first', true); draw(); return; }
+    try { const j = await post(`/api/curves/${sel}/erase`, { t0: a.t, t1: b.t, f0: b.f, f1: a.f }); setCurves(j.curves); status(`${j.removed} points removed from ${curves[sel].name}: press Fit to refit`); } catch (err) { status(err.message, true); draw(); }
     return;
   }
-  // fit
-  const allow_rise = $('allowRise').checked;
+  // trace
+  if (!d.moved) { if (e.target === cv) { guide.push(toTF(x, y)); draw(); } return; }
+  status('Tracing the line in the box…', false, true);
   try {
-    if (!d.moved && e.target === cv) {
-      const { t, f } = toTF(x, y); status(`Tracing and fitting the line through ${fmtT(t, 0.1)}, ${f.toFixed(1)} Hz…`, false, true);
-      const j = await post('/api/curves', { mode: 'seed', t, f, allow_rise, tmin: view.t0, tmax: view.t1 }); setCurves(j.curves);
-    } else if (d.moved) {
-      status('Tracing and fitting the line in the box…', false, true);
-      const j = await post('/api/curves', { mode: 'box', t0: a.t, t1: b.t, f0: b.f, f1: a.f, allow_rise }); setCurves(j.curves);
-    }
-    const c = curves[curves.length - 1];
-    status(c && c.fit ? `${c.name}: closest at ${fmtT(c.fit.t_cpa, 0.1)}, ${Math.round(c.fit.speed)} m/s, ${(c.fit.d_cpa / 1000).toFixed(2)} km, tone ${c.fit.f0} Hz (fit rms ${c.fit.rms_hz} Hz). Saved.` : 'Curve added');
+    const j = await post('/api/curves', { mode: 'box', t0: a.t, t1: b.t, f0: b.f, f1: a.f, allow_rise: $('allowRise').checked });
+    sel = j.curves.length - 1; setCurves(j.curves);
+    status(`${curves[sel].name}: ${curves[sel].n} points traced. Check them, then Fit.`);
   } catch (err) { status(err.message, true); draw(); }
 });
 cv.addEventListener('wheel', (e) => {
@@ -154,7 +210,6 @@ cv.addEventListener('wheel', (e) => {
   const q = evXY(e); const { t, f } = toTF(q.x, q.y);
   if (e.ctrlKey || e.metaKey) { // pinch on a trackpad, or Ctrl+scroll: zoom around the cursor
     const k = Math.exp(e.deltaY * 0.01);
-    const onlyT = e.altKey && false;
     view.t0 = t - (t - view.t0) * k; view.t1 = t + (view.t1 - t) * k;
     if (!e.shiftKey) { view.f0 = f - (f - view.f0) * k; view.f1 = f + (view.f1 - f) * k; }
   } else { // two-finger scroll: move in both directions (Shift+wheel = sideways for a mouse)
@@ -165,27 +220,53 @@ cv.addEventListener('wheel', (e) => {
   }
   clampView(); draw(); scheduleTile();
 }, { passive: false });
-cv.addEventListener('dblclick', () => $('zReset').click());
+cv.addEventListener('dblclick', (e) => {
+  if (tool === 'trace') { guide.pop(); finishGuide(); return; }  // the second click of the double-click added a duplicate point
+  if (tool === 'zoom' || tool === 'pan') $('zReset').click();
+});
 new ResizeObserver(resize).observe(cv);
 
+// ---------------------------------------------------------------- side-by-side windows
+function openWindow(v) {
+  v = v || view; if (!v) return;
+  const url = `/?solo=1&v=${[v.t0, v.t1, v.f0, v.f1].map((x) => x.toFixed(2)).join(',')}`;
+  window.open(url, '_blank', 'popup,width=1100,height=650');
+}
+$('popOut').onclick = () => openWindow();
+// every window follows changes made in the others
+setInterval(async () => {
+  try {
+    const r = await api('/api/version');
+    if (knownVersion >= 0 && r.version !== knownVersion) { const j = await api('/api/curves'); knownVersion = j.version; setCurves(j.curves, false); }
+    else knownVersion = r.version;
+    if (spec && r.name && r.name !== spec.name) location.reload();
+  } catch (e) { }
+}, 1500);
+
 // ---------------------------------------------------------------- fits list
-function setCurves(cs) {
-  curves = cs; const ul = $('curves'); ul.innerHTML = '';
+function setCurves(cs, bump = true) {
+  curves = cs; if (sel >= cs.length) sel = cs.length - 1;
+  const ul = $('curves'); ul.innerHTML = '';
   cs.forEach((c, i) => {
-    const li = document.createElement('li');
-    const fit = c.fit ? `closest ${fmtT(c.fit.t_cpa, 0.1)} · ${Math.round(c.fit.speed)} m/s · ${(c.fit.d_cpa / 1000).toFixed(1)} km · ${c.fit.f0} Hz · rms ${c.fit.rms_hz}` : 'no fit';
+    const li = document.createElement('li'); if (i === sel) li.className = 'sel';
+    const fit = c.fit ? `closest ${fmtT(c.fit.t_cpa, 0.1)} · ${Math.round(c.fit.speed)} m/s · ${(c.fit.d_cpa / 1000).toFixed(2)} km · ${c.fit.f0} Hz · rms ${c.fit.rms_hz} Hz` : `${c.n} points, not fitted yet`;
     li.innerHTML = `<span class="swatch" style="background:${COLORS[i % COLORS.length]}"></span>
-      <div><input class="nm" value="${c.name}" style="width:9em;padding:2px 4px"> <span class="meta">${fmtT(c.t[0], 1)}–${fmtT(c.t[c.t.length - 1], 1)}</span>
+      <div><input class="nm" value="${c.name}" style="width:8em;padding:2px 4px"> <span class="meta">${c.t.length ? fmtT(c.t[0], 1) + '–' + fmtT(c.t[c.t.length - 1], 1) : ''}</span>
+      <span class="badge ${c.fit ? 'ok' : 'todo'}">${c.fit ? 'fitted' : 'digitised'}</span>
       <div class="meta">${fit}</div>
-      <label class="chk" style="display:inline-flex;margin:2px 8px 0 0"><input type="checkbox" class="sh" ${c.show ? 'checked' : ''}> show</label>
-      <label class="chk" style="display:inline-flex;margin:2px 8px 0 0"><input type="checkbox" class="us" ${c.use ? 'checked' : ''}> use</label>
-      <a href="#" class="go meta">go to</a></div>
+      <div class="acts"><button class="ft ${c.fit ? '' : 'primary'}">${c.fit ? 'Refit' : 'Fit'}</button><button class="go">Go to</button><button class="win" title="Open this pass in its own window">⧉ Window</button>
+      <label class="chk" style="display:inline-flex;margin:0"><input type="checkbox" class="sh" ${c.show ? 'checked' : ''}> show</label>
+      <label class="chk" style="display:inline-flex;margin:0"><input type="checkbox" class="us" ${c.use ? 'checked' : ''}> use</label></div></div>
       <button class="x" title="delete">×</button>`;
-    li.querySelector('.x').onclick = async () => { if (!confirm(`Delete ${c.name}?`)) return; const j = await api(`/api/curves/${i}`, { method: 'DELETE' }); setCurves(j.curves); };
+    const passView = () => { const pad = Math.max(15, (c.t[c.t.length - 1] - c.t[0]) * 0.25), fmn = Math.min(...c.f), fmx = Math.max(...c.f), fp = Math.max(10, (fmx - fmn) * 0.35); return { t0: c.t[0] - pad, t1: c.t[c.t.length - 1] + pad, f0: fmn - fp, f1: fmx + fp }; };
+    li.onclick = (e) => { if (e.target.closest('input,button')) return; sel = i; setCurves(curves); setTool(tool); };
+    li.querySelector('.x').onclick = async () => { if (!confirm(`Delete ${c.name}?`)) return; const j = await api(`/api/curves/${i}`, { method: 'DELETE' }); if (sel === i) sel = -1; setCurves(j.curves); };
     li.querySelector('.nm').onchange = async (e) => setCurves((await patch(`/api/curves/${i}`, { name: e.target.value })).curves);
     li.querySelector('.sh').onchange = async (e) => setCurves((await patch(`/api/curves/${i}`, { show: e.target.checked })).curves);
     li.querySelector('.us').onchange = async (e) => setCurves((await patch(`/api/curves/${i}`, { use: e.target.checked })).curves);
-    li.querySelector('.go').onclick = (e) => { e.preventDefault(); const pad = 30, fmn = Math.min(...c.f), fmx = Math.max(...c.f); setView({ t0: c.t[0] - pad, t1: c.t[c.t.length - 1] + pad, f0: fmn - (fmx - fmn) * 0.3, f1: fmx + (fmx - fmn) * 0.3 }); };
+    li.querySelector('.ft').onclick = () => { sel = i; fitCurve(i); };
+    li.querySelector('.go').onclick = () => { sel = i; if (c.t.length) setView(passView()); setCurves(curves); };
+    li.querySelector('.win').onclick = () => c.t.length && openWindow(passView());
     ul.appendChild(li);
   });
   draw();
@@ -203,9 +284,13 @@ const layers = {
   'Dark (CARTO)': L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 19, attribution: '© OpenStreetMap, © CARTO' }),
 };
 layers['Satellite (Esri)'].addTo(map);
-L.control.layers(layers, null, { position: 'topright' }).addTo(map);
+// flights per aircraft type, each a map overlay that can be switched on and off
+const CAT = { prop: ['Flights: propeller', '#80ed99'], jet: ['Flights: jet', '#c0c6d0'], heli: ['Flights: helicopter', '#ffd166'], unknown: ['Flights: unknown type', '#8a93a3'] };
+const trackLayers = Object.fromEntries(Object.keys(CAT).map((k) => [k, L.layerGroup().addTo(map)]));
+const resultLayer = L.layerGroup().addTo(map), worldLayer = L.layerGroup().addTo(map);
+const overlays = { ...Object.fromEntries(Object.entries(CAT).map(([k, [name, col]]) => [`<span style="color:${col}">━</span> ${name}`, trackLayers[k]])), 'Location result': resultLayer, 'Worldwide candidates': worldLayer };
+L.control.layers(layers, overlays, { position: 'topright', collapsed: false }).addTo(map);
 L.control.scale({ imperial: false }).addTo(map);
-const trackLayer = L.layerGroup().addTo(map), resultLayer = L.layerGroup().addTo(map);
 let centerMarker = null, searchBox = null;
 function setCenter(lat, lon) {
   $('lat').value = (+lat).toFixed(5); $('lon').value = (+lon).toFixed(5);
@@ -222,9 +307,8 @@ map.on('click', (e) => setCenter(e.latlng.lat, e.latlng.lng));
 map.on('contextmenu', (e) => L.popup().setLatLng(e.latlng).setContent(`${e.latlng.lat.toFixed(5)}, ${e.latlng.lng.toFixed(5)}<br><a href="${gmaps(e.latlng.lat, e.latlng.lng)}" target="_blank">Open in Google Maps</a>`).openOn(map));
 ['lat', 'lon', 'radius'].forEach((id) => $(id).addEventListener('change', drawSearchBox));
 function setTracks(ts, fit = true) {
-  tracks = ts; trackLayer.clearLayers();
-  const col = { prop: '#80ed99', heli: '#ffd166', jet: '#c0c6d0', unknown: '#8a93a3' };
-  ts.forEach((t) => L.polyline(t.path, { color: col[t.category] || '#9aa3b2', weight: 1.5, opacity: 0.85 }).bindTooltip(`${t.label}${t.type ? ' · ' + t.type : ''} (${t.category})`).addTo(trackLayer));
+  tracks = ts; Object.values(trackLayers).forEach((l) => l.clearLayers());
+  ts.forEach((t) => { const c = CAT[t.category] ? t.category : 'unknown'; L.polyline(t.path, { color: CAT[c][1], weight: 1.5, opacity: 0.85 }).bindTooltip(`${t.label}${t.type ? ' · ' + t.type : ''} (${t.category})`).addTo(trackLayers[c]); });
   const n = (c) => ts.filter((t) => t.category === c).length;
   $('tracksInfo').textContent = ts.length ? `${ts.length} flights: ${n('prop')} propeller, ${n('heli')} helicopter, ${n('jet')} jet, ${n('unknown')} unknown type` : '';
   if (fit && ts.length) map.fitBounds(L.latLngBounds(ts.flatMap((t) => t.path)));
@@ -307,6 +391,104 @@ function showResult(r) {
   $('result').innerHTML = `<div class="result"><div><b>${r.lat.toFixed(5)}, ${r.lon.toFixed(5)}</b> · <a href="${gmaps(r.lat, r.lon)}" target="_blank">Google Maps</a></div><div>Recording started ${r.t_start_iso} · listener at ${Math.round(r.observer_alt)} m · ${r.n_tracks} flights considered</div>${rows}${others ? `<div class="sub" style="margin-top:4px">Other candidates (cost vs best): ${others}</div>` : ''}${truth}</div>`;
   map.fitBounds(r.bounds);
 }
+// ---------------------------------------------------------------- whole-day worldwide archive
+function showDay(d) {
+  if (!d) { $('dayInfo').textContent = ''; return; }
+  const c = d.categories;
+  $('dayInfo').innerHTML = `<b>${d.day}</b>: ${d.aircraft.toLocaleString()} aircraft below ${Math.round(d.max_alt_m / 1000)} km, worldwide (${c.prop.toLocaleString()} propeller, ${c.jet.toLocaleString()} jet, ${c.heli.toLocaleString()} helicopter, ${c.unknown.toLocaleString()} unknown)`;
+}
+$('dayBtn').onclick = async () => {
+  const path = $('dayPath').value.trim(); if (!path) return; localStorage.setItem('dayPath', path);
+  status('Opening the day…', false, true);
+  try {
+    let j = await post('/api/day/open', { path });
+    while (j.building) {
+      status(`Converting the day (one time only): ${Math.round(j.progress.fraction * 100)}%, ${(j.progress.aircraft || 0).toLocaleString()} aircraft so far`, false, true);
+      await new Promise((r) => setTimeout(r, 2000)); j = await api('/api/day/status');
+    }
+    showDay(j.day); status('Day opened');
+  } catch (err) { status(err.message, true); }
+};
+$('dayTracksBtn').onclick = async () => {
+  if (!$('lat').value || !$('start').value) { status('Set the search centre (click the map) and the recording start in step 4 first', true); return; }
+  status('Loading flights from the day…', false, true);
+  try {
+    const j = await post('/api/day/tracks', { lat: +$('lat').value, lon: +$('lon').value, radius: +$('radius').value + 20, start: $('start').value, uncertainty: +$('unc').value });
+    setTracks(j.tracks); status(`${j.tracks.length} flights loaded`);
+  } catch (err) { status(err.message, true); }
+};
+$('worldBtn').onclick = async () => {
+  const btn = $('worldBtn'); btn.disabled = true; status('Searching the whole day worldwide…', false, true); const stop = pollProgress('Worldwide');
+  try {
+    const types = [...document.querySelectorAll('.ty:checked')].map((x) => x.value);
+    const j = await post('/api/day/search', { types: types.length === 4 ? null : types, c: +$('c').value });
+    stop(); showWorld(j.candidates); status(`${j.candidates.length} candidate places`);
+  } catch (err) { stop(); status(err.message, true); }
+  btn.disabled = false;
+};
+function showWorld(cs) {
+  worldLayer.clearLayers(); const box = $('worldRes'); box.innerHTML = '';
+  if (!cs.length) { box.innerHTML = '<div class="sub">No place matched every pass. Try fitting the passes again, or untick a pass.</div>'; return; }
+  const best = cs.find((c) => c.cost != null);
+  cs.forEach((c, k) => {
+    const lat = c.lat ?? c.vote.lat, lon = c.lon ?? c.vote.lon, iso = c.t_start_iso || c.vote_iso;
+    const rel = c.cost != null && best ? (c.cost / best.cost).toFixed(1) + '×' : 'no match';
+    const div = document.createElement('div'); div.className = 'wc';
+    div.innerHTML = `<b>#${k + 1}</b> ${lat.toFixed(4)}, ${lon.toFixed(4)} · start ${iso.slice(11, 19)} UTC<br><span class="meta">misfit ${rel} of the best · ${c.vote.busy} low-traffic counts nearby · <a href="${gmaps(lat, lon)}" target="_blank">Google Maps</a></span>`;
+    const use = () => { setCenter(lat, lon); $('start').value = iso; $('unc').value = 60; $('radius').value = 8; map.setView([lat, lon], 11); $('dayTracksBtn').click(); };
+    div.onclick = (e) => { if (e.target.tagName !== 'A') use(); };
+    box.appendChild(div);
+    L.circleMarker([lat, lon], { radius: k ? 6 : 9, color: k ? '#f8961e' : '#80ed99', weight: 2 }).bindTooltip(`#${k + 1}: ${iso.slice(11, 19)} UTC, misfit ${rel}`).on('click', use).addTo(worldLayer);
+  });
+  const pts = cs.map((c) => [c.lat ?? c.vote.lat, c.lon ?? c.vote.lon]);
+  map.fitBounds(L.latLngBounds(pts).pad(0.3));
+}
+// remember the paths typed last time
+for (const id of ['path', 'histPath', 'dayPath']) { const v = localStorage.getItem(id); if (v && !$(id).value) $(id).value = v; $(id).addEventListener('change', () => localStorage.setItem(id, $(id).value)); }
+
+// ---------------------------------------------------------------- the model, explained
+const MODEL = [
+  ['h3', '1. What we measure'],
+  ['p', 'A propeller or engine emits a steady tone $f_0$ (blade-passing frequency and its harmonics). A listener at $\\mathbf{O}$ hears it shifted by the aircraft\'s motion: higher while it approaches, lower once it has passed. The spectrogram shows this as a falling S-shaped line, one per pass.'],
+  ['h3', '2. Sound takes time to arrive'],
+  ['p', 'The sound heard at time $t$ left the aircraft earlier, at the emission time $\\tau$, when the aircraft was at $\\mathbf{P}(\\tau)$:'],
+  ['d', 't = \\tau + \\frac{\\lVert \\mathbf{P}(\\tau) - \\mathbf{O} \\rVert}{c}'],
+  ['p', 'with $c \\approx 340\\ \\mathrm{m/s}$ the speed of sound. It is solved for $\\tau$ by fixed-point iteration, $\\tau_{k+1} = t - \\lVert \\mathbf{P}(\\tau_k) - \\mathbf{O}\\rVert / c$, which converges in a few steps because the aircraft is much slower than sound.'],
+  ['h3', '3. Doppler shift for a moving source and a still listener'],
+  ['d', 'f(t) = f_0 \\, \\frac{c}{c - v_r(\\tau)}, \\qquad v_r(\\tau) = \\mathbf{v}(\\tau) \\cdot \\frac{\\mathbf{O} - \\mathbf{P}(\\tau)}{\\lVert \\mathbf{O} - \\mathbf{P}(\\tau) \\rVert}'],
+  ['p', '$v_r$ is the speed of the aircraft towards the listener at the moment of emission ($v_r>0$ approaching). With ADS-B, $\\mathbf{P}(\\tau)$ and $\\mathbf{v}(\\tau)$ come from a smoothing spline through the reported positions (in Earth-centred coordinates), so each flight predicts a whole curve $f(t)$ for any listener position.'],
+  ['h3', '4. Straight-line flyover: the curve fitted to each pass'],
+  ['p', 'For one pass we assume a straight, level flight at constant speed $v$. Let $t_\\mathrm{cpa}$ be the (emission) time of closest approach and $d$ the 3D distance then. The aircraft is $x(\\tau) = v\\,(\\tau - t_\\mathrm{cpa})$ along its track, and'],
+  ['d', 'v_r(\\tau) = -\\,\\frac{v\\,x(\\tau)}{\\sqrt{x(\\tau)^2 + d^2}}, \\qquad t = \\tau + \\frac{\\sqrt{x(\\tau)^2 + d^2}}{c}'],
+  ['d', 'f(t) = f_0\\,\\frac{c}{c - v_r(\\tau(t))}'],
+  ['p', 'Four unknowns $(f_0,\\ t_\\mathrm{cpa},\\ v,\\ d)$ shape the curve: $f_0$ sets its middle, $v$ sets how far apart the start and end tones are, $\\frac{f_\\text{approach}}{f_\\text{recede}} \\to \\frac{c+v}{c-v}$, and $d$ sets how sharp the drop is (the slope at closest approach is about $-f_0 v^2 / (c\\,d)$).'],
+  ['h3', '5. Digitising and fitting'],
+  ['p', 'Your guide clicks $(t_i, g_i)$ are joined by a monotone spline $g(t)$. In every spectrogram frame only the band $|f - g(t)| \\le w$ is searched ($w$ = the ± Hz box, or 4 % of the frequency), the strongest bin is taken and refined by a parabola through its neighbours:'],
+  ['d', '\\hat f_j = f_{b} + \\frac{\\Delta f}{2}\\,\\frac{S_{b-1} - S_{b+1}}{S_{b-1} - 2S_b + S_{b+1}}'],
+  ['p', 'Weak peaks, peaks on the band edge, and points more than 2 Hz off a running median are dropped. Then the four parameters are found by non-linear least squares, started from several distances to avoid a wrong local minimum:'],
+  ['d', '\\min_{f_0,\\,t_\\mathrm{cpa},\\,v,\\,d}\\ \\sum_j \\big(\\hat f_j - f(t_j;\\,f_0, t_\\mathrm{cpa}, v, d)\\big)^2'],
+  ['p', 'The rms residual (Hz) says how well a straight flyover explains the points. A turning or climbing aircraft fits worse.'],
+  ['h3', '6. Finding the place'],
+  ['p', 'For a candidate listener position $\\mathbf{O}$ (a grid over the search area, with the ground height from a DEM) and recording start $T$, every flight $k$ predicts a curve shape $r_k(t) = c / (c - v_r)$. Each pass $j$ is compared with each flight, solving for its unknown tone in closed form:'],
+  ['d', '\\hat f_{0} = \\frac{\\sum_i \\hat f_i\\, r_k(t_i)}{\\sum_i r_k(t_i)^2}, \\qquad \\mathrm{cost}_{jk} = \\frac{\\sqrt{\\tfrac1n \\sum_i (\\hat f_i - \\hat f_0\\, r_k(t_i))^2}}{\\hat f_0}'],
+  ['p', 'Flights are first filtered by type (propeller / jet), and by the speed and closest distance fitted in step 5. The passes are locked together: they share one start time $T$, so the fixed gaps between them in the recording (e.g. B and C, 920 s apart) must match the flights. Each pass may shift by a couple of seconds (timing slack) and its tone is free. The total cost over all passes, plus a penalty for loud flights that should have been heard but are not in the recording (silence), is minimised over $(\\mathbf{O}, T)$, first on a coarse grid then refined.'],
+  ['h3', '7. Worldwide search'],
+  ['p', 'Without a known area, every low aircraft sample of the whole day with the right ground speed "votes" for the places abeam of it at up to the fitted distance, and for the start time $T = \\tau_\\text{sample} - t_\\mathrm{cpa}$. Places and times voted by every pass (by different aircraft) are candidates; busy places such as airports, where low aircraft pass all the time, are ranked down because the recording is mostly quiet. The best candidates are then checked with the full curve match above.'],
+];
+function renderModel() {
+  const box = $('modelText'); if (box.dataset.done) return;
+  const tex = (src, display) => { try { return katex.renderToString(src, { displayMode: display, throwOnError: false }); } catch (e) { return src; } };
+  box.innerHTML = '<h2 style="margin:0 0 4px;color:var(--text);text-transform:none;letter-spacing:0;font-size:18px">How Doppler curves are modelled and fitted</h2>' + MODEL.map(([k, t]) => {
+    if (k === 'd') return `<div>${tex(t, true)}</div>`;
+    const html = t.replace(/\$([^$]+)\$/g, (_, m) => tex(m, false));
+    return k === 'h3' ? `<h3>${html}</h3>` : `<p>${html}</p>`;
+  }).join('');
+  box.dataset.done = '1';
+}
+document.querySelectorAll('.openModel').forEach((b) => b.addEventListener('click', (e) => { e.preventDefault(); renderModel(); $('modelBox').style.display = 'block'; }));
+$('modelClose').onclick = () => { $('modelBox').style.display = 'none'; };
+$('modelBox').onclick = (e) => { if (e.target.id === 'modelBox') $('modelBox').style.display = 'none'; };
+
 $('demoBtn').onclick = async () => {
   status('Rendering the synthetic demo recording…', false, true);
   try {
@@ -314,13 +496,13 @@ $('demoBtn').onclick = async () => {
     setCurves(j.curves || []); await setSpec(j.spec); setTracks(j.tracks, false);
     const g = j.guess; $('start').value = g.start; $('unc').value = g.uncertainty; $('radius').value = g.radius; $('alt').value = g.alt;
     setCenter(g.lat, g.lon); map.setView([g.lat, g.lon], 9);
-    status('Demo loaded: use Fit on the two falling lines near 100 Hz at ~100 s and ~200 s, then Find location');
+    status('Demo loaded: with ✎ Trace, click along each falling line near 100 Hz (~100 s and ~200 s), Enter, Fit; then Find location');
   } catch (err) { status(err.message, true); }
 };
 
 // restore state on reload
 (async () => {
-  try { const s = await api('/api/state'); setCurves(s.curves); if (s.spec.loaded) await setSpec(s.spec); if (s.tracks.length) setTracks(s.tracks); } catch (e) { }
+  try { const s = await api('/api/state'); knownVersion = s.version; setCurves(s.curves); if (s.spec.loaded) await setSpec(s.spec); if (!SOLO && s.tracks.length) setTracks(s.tracks); showDay(s.day); } catch (e) { }
 })();
 
 // draggable split between the sound map and the map

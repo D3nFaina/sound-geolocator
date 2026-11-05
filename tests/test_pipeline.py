@@ -116,3 +116,65 @@ def test_silence_and_dem(scenario):
     assert np.all(diff[np.abs(n + 4000) > 3500] == 0)  # ...and only near its path
     assert haversine_m(quiet.lat, quiet.lon, LAT0, LON0) < 400
     assert quiet.observer_alt == pytest.approx(ALT0)
+
+
+def _write_day_tar(tmp_path, flights, n_split=2):
+    """A fake adsb.lol day: one gzip readsb trace per aircraft, tar split into parts."""
+    import gzip
+    import io
+    import json
+    import tarfile
+
+    from sound_geolocator.flights import FT
+    from sound_geolocator.geo import lla_to_enu_offsets
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        for tr in flights:
+            t, la, lo, al = tr.t[::2], tr.lat[::2], tr.lon[::2], tr.alt[::2]
+            e, n = lla_to_enu_offsets(la[0], lo[0], la, lo)
+            ve, vn = np.gradient(e, t), np.gradient(n, t)
+            gs, trk = np.hypot(ve, vn) / 0.514444, np.degrees(np.arctan2(ve, vn)) % 360
+            rows = [[float(t[i] - t[0]), float(la[i]), float(lo[i]), int(al[i] / FT), float(gs[i]), float(trk[i]),
+                     0, 0, None, "adsb_icao", int(al[i] / FT)] for i in range(len(t))]
+            raw = gzip.compress(json.dumps({"icao": tr.ident, "timestamp": float(t[0]), "t": tr.typecode,
+                                            "trace": rows}).encode())
+            ti = tarfile.TarInfo(f"./traces/{tr.ident[-2:]}/trace_full_{tr.ident}.json")
+            ti.size = len(raw)
+            tf.addfile(ti, io.BytesIO(raw))
+    b = buf.getvalue()
+    cut = np.linspace(0, len(b), n_split + 1).astype(int)
+    for k in range(n_split):
+        (tmp_path / f"day.tar.a{'abcdefgh'[k]}").write_bytes(b[cut[k]:cut[k + 1]])
+    return tmp_path / "day.tar.aa"
+
+
+def test_day_archive_and_world_search(tmp_path):
+    from sound_geolocator.adsb_day import build_day, open_day
+    from sound_geolocator.geo import haversine_m
+    from sound_geolocator.synth import demo_scenario, straight_track
+
+    flights, truth, t0 = demo_scenario()
+    rng = np.random.default_rng(3)
+    for k in range(150):  # distractors all over the world
+        flights.append(straight_track(f"{k:06x}", rng.uniform(-50, 60), rng.uniform(-180, 180), t0 + rng.uniform(-30000, 30000),
+                                      0, 0, rng.uniform(0, 360), rng.uniform(60, 250), rng.uniform(300, 6000),
+                                      duration=2000, noise_m=5, typecode="C172"))
+    src = _write_day_tar(tmp_path, flights)
+    # resumable: stop after every chunk, then carry on
+    out = tmp_path / "day.sgday"
+    for _ in range(50):
+        if build_day(src, out, time_budget_s=0.0, chunk=40, workers=1):
+            break
+    day = open_day(out)
+    assert len(day) > 100  # low-enough aircraft of the fake day
+    near = day.tracks(t0, t0 + 360, truth[0], truth[1], 30)
+    assert {t.ident for t in near} == {"a1b2c3", "d4e5f6"}
+    c = 340.0
+    d1, d2 = np.hypot(1500, 1380), np.hypot(2000, 2380)
+    passes = [dict(t_cpa=100.0, speed=120, d_cpa=d1), dict(t_cpa=200.0, speed=140, d_cpa=d2)]
+    cands = day.search_world(passes, recording_s=360)
+    assert cands, "the true place should be voted for"
+    best = min(cands[:3], key=lambda w: haversine_m(w.lat, w.lon, truth[0], truth[1]))
+    assert haversine_m(best.lat, best.lon, truth[0], truth[1]) < 6000
+    assert abs(best.t_start - t0) < 60

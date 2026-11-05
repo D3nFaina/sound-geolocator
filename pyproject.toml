@@ -21,4 +21,4 @@ sgeo = "sound_geolocator.cli:main"
 packages = ["sound_geolocator", "sound_geolocator.gui"]
 
 [tool.setuptools.package-data]
-"sound_geolocator.gui" = ["static/*", "static/leaflet/*", "static/leaflet/images/*"]
+"sound_geolocator.gui" = ["static/*", "static/leaflet/*", "static/leaflet/images/*", "static/katex/*", "static/katex/fonts/*"]

@@ -6,6 +6,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="/static/leaflet/leaflet.css">
 <script src="/static/leaflet/leaflet.js"></script>
+<link rel="stylesheet" href="/static/katex/katex.min.css">
+<script defer src="/static/katex/katex.min.js"></script>
 <style>
   :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --text:#e6e8ee; --muted:#9aa3b2; --accent:#4cc9f0; --warn:#f8961e; --ok:#80ed99; }
   * { box-sizing:border-box; }
@@ -37,8 +39,29 @@
   #toolbar { display:flex; gap:6px; align-items:center; padding:6px 8px; border-bottom:1px solid var(--line); background:var(--panel); }
   #toolbar button { padding:4px 9px; }
   #spec { width:100%; height:100%; display:block; cursor:crosshair; min-height:0; }
-  #readout { position:absolute; right:10px; top:46px; background:#000a; padding:3px 8px; border-radius:4px; font:12px ui-monospace, monospace; pointer-events:none; }
-  #hint { position:absolute; left:70px; top:46px; color:var(--muted); font-size:12px; pointer-events:none; }
+  body.solo { grid-template-columns:1fr; }
+  body.solo aside, body.solo #split, body.solo #map { display:none; }
+  body.solo main { grid-template-rows:1fr; }
+  #toolbar { flex-wrap:wrap; }
+  #toolbar input[type=number] { width:4.5em; padding:3px 5px; }
+  .sep { width:1px; align-self:stretch; background:var(--line); margin:0 4px; }
+  .curves li.sel { border-color:var(--accent); background:#4cc9f010; }
+  .curves .acts { display:flex; gap:6px; flex-wrap:wrap; margin-top:3px; }
+  .curves .acts button { padding:2px 8px; font-size:12px; }
+  .curves .acts button.primary { padding:2px 10px; }
+  .badge { font-size:11px; border-radius:4px; padding:0 5px; margin-left:4px; }
+  .badge.todo { background:#f8961e33; color:#f8961e; }
+  .badge.ok { background:#80ed9933; color:#80ed99; }
+  #modelBox { position:fixed; inset:0; background:#000a; display:none; z-index:2000; }
+  #modelBox .card { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); width:min(860px,94vw); max-height:90vh; overflow-y:auto; background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:18px 24px; line-height:1.55; }
+  #modelBox h3 { margin:18px 0 6px; font-size:15px; color:var(--accent); }
+  #modelBox p { margin:6px 0; color:#cfd4dd; }
+  #modelBox .katex-display { margin:8px 0; overflow-x:auto; overflow-y:hidden; }
+  #modelBox .close { position:sticky; top:0; float:right; }
+  .wc { border:1px solid var(--line); border-radius:6px; padding:6px 8px; margin-top:6px; font-size:12px; cursor:pointer; }
+  .wc:hover { border-color:var(--accent); }
+  #readout { position:absolute; right:10px; top:52px; background:#000a; padding:3px 8px; border-radius:4px; font:12px ui-monospace, monospace; pointer-events:none; }
+  #hint { position:absolute; left:80px; top:52px; color:var(--muted); font-size:12px; pointer-events:none; }
   #map { width:100%; height:100%; }
   #status { position:fixed; bottom:12px; left:356px; background:#000c; border:1px solid var(--line); padding:8px 12px; border-radius:6px; display:none; max-width:60vw; z-index:1000; }
   #status.err { border-color:#e63946; color:#ffb3b8; }
@@ -76,7 +99,7 @@
   </div>
 
   <h2><span class="n">2</span>Doppler curves</h2>
-  <p class="sub">Use <b>⬚ Zoom</b> to drag a rectangle around a pass, then <b>〰 Fit</b>: click on the line or drag a box around it. Fits are saved automatically and come back next time you open this recording. Two-finger scroll moves around, pinch or Ctrl+scroll zooms. <b>use</b> = include in the location search.</p>
+  <p class="sub"><b>⬚ Zoom</b> into a pass. With <b>✎ Trace</b>, click 4 to 8 points roughly along the line and press <b>Enter</b> (or double-click): only the narrow band around your points is digitised, so it can't wander onto other lines. Check the dots sit on the line, remove strays with <b>⌫ Erase</b> (drag a box), then <b>Fit</b>. Everything is saved and comes back next time. Two-finger scroll moves, pinch or Ctrl+scroll zooms. <b>use</b> = include in the location search. <a href="#" class="openModel">How the model works</a></p>
   <label class="chk"><input id="allowRise" type="checkbox"> allow rising pitch (turning or climbing aircraft)</label>
   <ul id="curves" class="curves"></ul>
   <div class="row">
@@ -86,6 +109,11 @@
   <input id="curvesFile" type="file" accept=".json">
 
   <h2><span class="n">3</span>Flights</h2>
+  <label>Whole day, worldwide (adsb.lol day: the <b>.tar.aa</b> part, or the converted <b>.sgday</b> folder)</label>
+  <div style="display:grid;grid-template-columns:1fr auto;gap:6px"><input id="dayPath" type="text" placeholder="~/Downloads/v2026.09.08-planes-readsb-prod-0.sgday"><button id="dayBtn">Open</button></div>
+  <div id="dayInfo" class="sub" style="margin-top:4px"></div>
+  <button id="dayTracksBtn" style="margin-top:4px">Load the day's flights around the search centre</button>
+  <p class="sub" style="margin-top:10px">Other sources:</p>
   <p class="sub">ADS-B tracks around the place and time: a CSV with time, icao24, lat, lon, altitude (OpenSky / ADS-B Exchange exports work).</p>
   <label class="btn" for="tracksFile">Open flight tracks…</label>
   <input id="tracksFile" type="file" accept=".csv,.json">
@@ -140,8 +168,10 @@
     <input id="demFile" type="file" accept=".tif,.tiff,.npz">
     <div id="demInfo" class="sub"></div>
   </details>
-  <button id="locateBtn" class="primary" style="width:100%;margin-top:12px">Find location</button>
+  <button id="locateBtn" class="primary" style="width:100%;margin-top:12px">Find location (around the search centre)</button>
   <div id="result"></div>
+  <button id="worldBtn" style="width:100%;margin-top:8px" title="Needs the whole-day archive (step 3) and at least two fitted passes">Search worldwide (whole day, any country)</button>
+  <div id="worldRes"></div>
 </aside>
 <main>
   <div id="specwrap">
@@ -149,12 +179,19 @@
       <div class="seg" title="Tool (keys: Z, H, F)">
         <button id="tZoom" class="on" title="Drag a rectangle to zoom into it (Z)">⬚ Zoom</button>
         <button id="tPan" title="Drag to move around (H)">✋ Pan</button>
-        <button id="tFit" title="Click a line, or drag a box around it, to trace and fit it (F)">〰 Fit</button>
+        <button id="tTrace" title="Click points along a line, Enter or double-click to digitise it; drag a box to auto-trace (T)">✎ Trace</button>
+        <button id="tErase" title="Drag a box to remove points of the selected pass (E)">⌫ Erase</button>
       </div>
+      <label class="chk" style="margin:0" title="Half-width of the band around your guide points (empty = 4% of the frequency)">± Hz <input id="bandW" type="number" min="1" step="1" placeholder="auto"></label>
+      <button id="fitSel" class="primary" title="Fit the flyover model to the selected pass (Enter)">Fit selected</button>
+      <span class="sep"></span>
       <button id="zBack" title="Previous view (Backspace)">↶ Back</button>
       <button id="zReset" title="Whole recording (0)">⤢ All</button>
       <label class="chk" style="margin:0 0 0 6px"><input id="showFits" type="checkbox" checked> show fits</label>
       <label class="chk" style="margin:0 0 0 6px"><input id="showModel" type="checkbox" checked> model curves</label>
+      <span class="sep"></span>
+      <button id="popOut" title="Open this view in a new window, to work on passes side by side">⧉ New window</button>
+      <button class="openModel" title="The Doppler model and how curves are fitted">∑ Model</button>
     </div>
     <canvas id="spec"></canvas><div id="readout"></div><div id="hint">Load a recording or the demo to begin</div>
   </div>
@@ -162,6 +199,7 @@
   <div id="map"></div>
 </main>
 <div id="status"></div>
+<div id="modelBox"><div class="card"><button class="close" id="modelClose">Close</button><div id="modelText"></div></div></div>
 <script src="/static/app.js"></script>
 </body>
 </html>
