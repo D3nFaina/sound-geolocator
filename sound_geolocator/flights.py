@@ -27,6 +27,7 @@ class Track:
     lon: np.ndarray
     alt: np.ndarray
     callsign: str = ""
+    typecode: str = ""  # ICAO aircraft type designator, e.g. "AT76", "A320"
     position_noise_m: float = 15.0
     max_gap_s: float = 60.0
     _splines: list = field(default=None, repr=False)
@@ -71,7 +72,13 @@ class Track:
     def slice(self, t0, t1):
         m = (self.t >= t0) & (self.t <= t1)
         return Track(self.ident, self.t[m], self.lat[m], self.lon[m], self.alt[m], self.callsign,
-                     self.position_noise_m, self.max_gap_s)
+                     self.typecode, self.position_noise_m, self.max_gap_s)
+
+    @property
+    def category(self):
+        from .aircraft_types import classify
+
+        return classify(self.typecode)
 
 
 # ----------------------------------------------------------------------------- loaders
@@ -91,6 +98,7 @@ _ALIASES = {
     "time": ["time", "timestamp", "t", "unix_time", "ts", "utc"],
     "ident": ["icao24", "hex", "icao", "ident", "id", "flight_id", "aircraft"],
     "callsign": ["callsign", "flight", "call_sign"],
+    "typecode": ["typecode", "type", "aircraft_type", "icao_type", "actype", "model"],
     "lat": ["lat", "latitude"],
     "lon": ["lon", "lng", "long", "longitude"],
     "alt_m": ["alt_m", "geoaltitude", "geo_altitude", "altitude_m", "baroaltitude", "baro_altitude"],
@@ -121,6 +129,7 @@ def load_tracks_csv(path: str | Path) -> list[Track]:
     ct, ci, cc = _col(header, "time"), _col(header, "ident"), _col(header, "callsign")
     cla, clo = _col(header, "lat"), _col(header, "lon")
     cam, caf = _col(header, "alt_m"), _col(header, "alt_ft")
+    cty = _col(header, "typecode")
     if not (ct and cla and clo and (cam or caf)):
         raise ValueError(f"{path}: need time, lat, lon and altitude columns, got {list(header)}")
     groups: dict[str, dict] = {}
@@ -131,20 +140,24 @@ def load_tracks_csv(path: str | Path) -> list[Track]:
         except (TypeError, ValueError):
             continue  # skip rows without a position (e.g. "ground" altitude)
         key = (r[ci] if ci else "aircraft").strip().lower()
-        g = groups.setdefault(key, {"t": [], "lat": [], "lon": [], "alt": [], "cs": ""})
+        g = groups.setdefault(key, {"t": [], "lat": [], "lon": [], "alt": [], "cs": "", "ty": ""})
         g["t"].append(_parse_time(r[ct])); g["lat"].append(lat); g["lon"].append(lon); g["alt"].append(alt)
         if cc and r[cc]:
             g["cs"] = r[cc].strip()
-    return [Track(k, g["t"], g["lat"], g["lon"], g["alt"], g["cs"]) for k, g in groups.items() if len(g["t"]) >= 4]
+        if cty and r[cty]:
+            g["ty"] = r[cty].strip().upper()
+    return [Track(k, g["t"], g["lat"], g["lon"], g["alt"], g["cs"], g["ty"])
+            for k, g in groups.items() if len(g["t"]) >= 4]
 
 
 def save_tracks_csv(tracks: list[Track], path: str | Path):
     with open(path, "w", newline="") as fh:
         w = csv.writer(fh)
-        w.writerow(["time", "icao24", "callsign", "lat", "lon", "alt_m"])
+        w.writerow(["time", "icao24", "callsign", "typecode", "lat", "lon", "alt_m"])
         for tr in tracks:
             for i in range(len(tr.t)):
-                w.writerow([f"{tr.t[i]:.2f}", tr.ident, tr.callsign, f"{tr.lat[i]:.6f}", f"{tr.lon[i]:.6f}", f"{tr.alt[i]:.1f}"])
+                w.writerow([f"{tr.t[i]:.2f}", tr.ident, tr.callsign, tr.typecode, f"{tr.lat[i]:.6f}",
+                            f"{tr.lon[i]:.6f}", f"{tr.alt[i]:.1f}"])
 
 
 # ----------------------------------------------------------------------------- OpenSky
@@ -224,5 +237,6 @@ def load_tracks(path: str | Path) -> list[Track]:
     path = Path(path)
     if path.suffix.lower() == ".json":
         data = json.loads(path.read_text())
-        return [Track(d["ident"], d["t"], d["lat"], d["lon"], d["alt"], d.get("callsign", "")) for d in data]
+        return [Track(d["ident"], d["t"], d["lat"], d["lon"], d["alt"], d.get("callsign", ""), d.get("typecode", ""))
+                for d in data]
     return load_tracks_csv(path)

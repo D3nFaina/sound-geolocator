@@ -14,7 +14,7 @@ from .geo import enu_offsets_to_lla, lla_to_ecef
 
 
 def straight_track(ident, lat0, lon0, t0, east0, north0, heading_deg, speed, alt, duration=900.0,
-                   report_dt=1.0, noise_m=0.0, climb=0.0, rng=None, callsign=""):
+                   report_dt=1.0, noise_m=0.0, climb=0.0, rng=None, callsign="", typecode=""):
     """A constant-heading flight starting at (east0, north0) metres from (lat0, lon0)."""
     rng = rng or np.random.default_rng(0)
     t = t0 + np.arange(0, duration, report_dt)
@@ -23,7 +23,7 @@ def straight_track(ident, lat0, lon0, t0, east0, north0, heading_deg, speed, alt
     n = north0 + speed * np.cos(h) * (t - t0) + rng.normal(0, noise_m, t.size)
     a = alt + climb * (t - t0)
     lat, lon = enu_offsets_to_lla(lat0, lon0, e, n)
-    return Track(ident, t, lat, lon, a, callsign or ident.upper())
+    return Track(ident, t, lat, lon, a, callsign or ident.upper(), typecode)
 
 
 def render_recording(tracks, observer, t_start, duration, sr=4000, tones=None, noise=0.02,
@@ -68,10 +68,13 @@ def demo_scenario():
     t0 = 1_760_000_000.0
     flights = [
         # northbound at 120 m/s, 1500 m up, closest ~1.5 km east of the listener at t0+100
-        straight_track("a1b2c3", lat0, lon0, t0 - 400, 1500, -60000, 0, 120, 1500, duration=1400, noise_m=8),
+        straight_track("a1b2c3", lat0, lon0, t0 - 400, 1500, -60000, 0, 120, 1500, duration=1400, noise_m=8,
+                       typecode="AT76"),
         # eastbound at 140 m/s, 2500 m up, closest ~2 km north at t0+200
-        straight_track("d4e5f6", lat0, lon0, t0 - 400, -84000, 2000, 90, 140, 2500, duration=1400, noise_m=8),
+        straight_track("d4e5f6", lat0, lon0, t0 - 400, -84000, 2000, 90, 140, 2500, duration=1400, noise_m=8,
+                       typecode="DH8D"),
         # distractor
-        straight_track("0f0f0f", lat0, lon0, t0 - 400, 15000, -40000, 20, 200, 9000, duration=1400, noise_m=8),
+        straight_track("0f0f0f", lat0, lon0, t0 - 400, 15000, -40000, 20, 200, 9000, duration=1400, noise_m=8,
+                       typecode="A320"),
     ]
     return flights, (lat0, lon0, alt0), t0

@@ -150,8 +150,10 @@ map.on('click', (e) => setCenter(e.latlng.lat, e.latlng.lng));
 ['lat', 'lon', 'radius'].forEach((id) => $(id).addEventListener('change', drawSearchBox));
 function setTracks(ts, fit = true) {
   tracks = ts; trackLayer.clearLayers();
-  ts.forEach((t) => L.polyline(t.path, { color: '#9aa3b2', weight: 1.5, opacity: 0.7 }).bindTooltip(t.label).addTo(trackLayer));
-  $('tracksInfo').textContent = ts.length ? `${ts.length} flights loaded` : '';
+  const col = { prop: '#80ed99', heli: '#ffd166', jet: '#9aa3b2', unknown: '#6c7686' };
+  ts.forEach((t) => L.polyline(t.path, { color: col[t.category] || '#9aa3b2', weight: 1.5, opacity: 0.8 }).bindTooltip(`${t.label}${t.type ? ' · ' + t.type : ''} (${t.category})`).addTo(trackLayer));
+  const n = (c) => ts.filter((t) => t.category === c).length;
+  $('tracksInfo').textContent = ts.length ? `${ts.length} flights: ${n('prop')} propeller, ${n('heli')} helicopter, ${n('jet')} jet, ${n('unknown')} unknown type` : '';
   if (fit && ts.length) map.fitBounds(L.latLngBounds(ts.flatMap((t) => t.path)));
 }
 
@@ -168,6 +170,11 @@ $('reSpec').onclick = async () => {
 };
 $('vEnh').onclick = () => { viewMode = 'enhanced'; $('vEnh').classList.add('on'); $('vRaw').classList.remove('on'); if (spec) loadImage(); };
 $('vRaw').onclick = () => { viewMode = 'raw'; $('vRaw').classList.add('on'); $('vEnh').classList.remove('on'); if (spec) loadImage(); };
+$('demFile').onchange = async (e) => {
+  status('Loading DEM…', false, true);
+  try { const j = await upload('/api/dem', e.target.files[0]); $('dem').value = 'file'; $('demInfo').textContent = `${j.name}: lat ${j.lat[0].toFixed(2)}–${j.lat[1].toFixed(2)}, lon ${j.lon[0].toFixed(2)}–${j.lon[1].toFixed(2)}`; status('DEM loaded'); } catch (err) { status(err.message, true); }
+  e.target.value = '';
+};
 $('curvesFile').onchange = async (e) => { try { const j = await upload('/api/curves/import', e.target.files[0]); setCurves(j.curves); } catch (err) { status(err.message, true); } e.target.value = ''; };
 $('tracksFile').onchange = async (e) => {
   status('Loading flights…', false, true);
@@ -182,7 +189,13 @@ $('openskyBtn').onclick = async () => {
 $('locateBtn').onclick = async () => {
   const btn = $('locateBtn'); btn.disabled = true; status('Searching positions and start times… (can take a minute)', false, true);
   try {
-    const r = await post('/api/locate', { lat: +$('lat').value, lon: +$('lon').value, radius: +$('radius').value, step: +$('step').value, start: $('start').value, uncertainty: +$('unc').value, alt: +$('alt').value, c: +$('c').value });
+    const types = [...document.querySelectorAll('.ty:checked')].map((x) => x.value);
+    const r = await post('/api/locate', {
+      lat: +$('lat').value, lon: +$('lon').value, radius: +$('radius').value, step: +$('step').value, start: $('start').value,
+      uncertainty: +$('unc').value, alt: +$('alt').value, c: +$('c').value, types,
+      cpa_slack: +$('slack').value, silence_km: $('silence').value ? +$('silence').value : null, fit_gate: $('fitGate').checked,
+      dem: $('dem').value, geoid: $('geoid').value ? +$('geoid').value : 0,
+    });
     showResult(r); status('Done');
   } catch (err) { status(err.message, true); }
   btn.disabled = false;
@@ -197,8 +210,10 @@ function showResult(r) {
     const d = map.distance([r.lat, r.lon], [r.truth.lat, r.truth.lon]);
     truth = `<div>Demo truth is <b>${Math.round(d)} m</b> away, start time off by ${(r.t_start - r.truth.t_start).toFixed(1)} s.</div>`;
   }
-  const rows = r.assignments.map((a) => `<div>${a.curve} → <b>${a.flight}</b>, tone ${a.f_src.toFixed(1)} Hz, misfit ${a.rms_hz.toFixed(2)} Hz</div>`).join('');
-  $('result').innerHTML = `<div class="result"><div><b>${r.lat.toFixed(5)}, ${r.lon.toFixed(5)}</b> · <a href="https://www.openstreetmap.org/?mlat=${r.lat}&mlon=${r.lon}#map=15/${r.lat}/${r.lon}" target="_blank">open map</a></div><div>Recording started ${r.t_start_iso}</div>${rows}${truth}</div>`;
+  const rows = r.assignments.map((a) => `<div>${a.curve} → <b>${a.flight}</b>, tone ${a.f_src.toFixed(1)} Hz, misfit ${a.rms_hz.toFixed(2)} Hz${a.time_shift_s ? `, shift ${a.time_shift_s > 0 ? '+' : ''}${a.time_shift_s.toFixed(1)} s` : ''}</div>`).join('');
+  (r.candidates || []).slice(1).forEach(([la, lo, co], k) => L.circleMarker([la, lo], { radius: 5, color: '#f8961e' }).bindTooltip(`candidate ${k + 2}: cost ${(co / r.cost).toFixed(1)}× the best`).addTo(resultLayer));
+  const others = (r.candidates || []).slice(1).map(([la, lo, co]) => `${la.toFixed(4)}, ${lo.toFixed(4)} (${(co / r.cost).toFixed(1)}×)`).join(' · ');
+  $('result').innerHTML = `<div class="result"><div><b>${r.lat.toFixed(5)}, ${r.lon.toFixed(5)}</b> · <a href="https://www.openstreetmap.org/?mlat=${r.lat}&mlon=${r.lon}#map=15/${r.lat}/${r.lon}" target="_blank">open map</a></div><div>Recording started ${r.t_start_iso} · listener at ${Math.round(r.observer_alt)} m · ${r.n_tracks} flights considered</div>${rows}${others ? `<div class="sub" style="margin-top:4px">Other candidates (cost vs best): ${others}</div>` : ''}${truth}</div>`;
   map.fitBounds(r.bounds);
 }
 $('demoBtn').onclick = async () => {

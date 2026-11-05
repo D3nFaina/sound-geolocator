@@ -113,7 +113,24 @@ def cmd_fetch(args):
     print(f"wrote {len(tracks)} tracks to {args.out}")
 
 
+def _make_dem(spec, lat, lon, radius_km, geoid_offset):
+    """--dem value: a .tif/.npz file, or an OpenTopoData dataset name like srtm30m / eudem25m."""
+    from .elevation import DEM
+
+    if spec is None:
+        return None
+    p = Path(spec)
+    if p.suffix.lower() == ".npz" and p.exists():
+        return DEM.load(p, geoid_offset_m=geoid_offset)
+    if p.suffix.lower() in (".tif", ".tiff"):
+        return DEM.from_geotiff(p, geoid_offset_m=geoid_offset)
+    cache = Path(f"dem_{spec}_{lat:.3f}_{lon:.3f}_{radius_km:.0f}km.npz")
+    print(f"[dem] sampling {spec} from OpenTopoData (cached in {cache})")
+    return DEM.from_opentopodata(lat, lon, radius_km, dataset=spec, cache=cache, geoid_offset_m=geoid_offset)
+
+
 def cmd_locate(args):
+    from .aircraft_types import filter_tracks
     from .extract import load_curves
     from .flights import load_tracks
     from .locate import locate
@@ -123,16 +140,30 @@ def cmd_locate(args):
         keep = set(args.only.split(","))
         curves = [c for c in curves if c.name in keep]
     tracks = load_tracks(args.tracks)
-    res = locate(curves, tracks, _pair(args.center), _time(args.start), args.uncertainty, args.radius,
-                 args.step, args.refine, args.alt, args.dt, args.c)
+    if args.types:
+        n = len(tracks)
+        tracks = filter_tracks(tracks, args.types.split(","))
+        print(f"[types] kept {len(tracks)}/{n} flights of class {args.types}")
+    lat, lon = _pair(args.center)
+    alt = _make_dem(args.dem, lat, lon, args.radius, args.geoid_offset) or args.alt
+    res = locate(curves, tracks, (lat, lon), _time(args.start), args.uncertainty, args.radius,
+                 args.step, args.refine, alt, args.dt, args.c, cpa_slack_s=args.cpa_slack,
+                 fit_gate=not args.no_fit_gate, silence_km=args.silence_km, recording_s=args.recording_s,
+                 n_candidates=args.candidates)
     start = datetime.fromtimestamp(res.t_start, timezone.utc).isoformat()
-    print(f"\nestimated location: {res.lat:.5f}, {res.lon:.5f}")
+    print(f"\nestimated location: {res.lat:.5f}, {res.lon:.5f}  (listener altitude {res.observer_alt:.0f} m)")
     print(f"recording started: {start}")
     print(f"https://www.openstreetmap.org/?mlat={res.lat:.5f}&mlon={res.lon:.5f}#map=14/{res.lat:.5f}/{res.lon:.5f}")
     for a in res.assignments:
-        print(f"  {a.curve} -> {a.flight}: source tone {a.f_src:.2f} Hz, misfit {a.rms_hz:.2f} Hz")
+        print(f"  {a.curve} -> {a.flight}: source tone {a.f_src:.2f} Hz, misfit {a.rms_hz:.2f} Hz, "
+              f"timing shift {a.time_shift_s:+.1f} s")
+    if len(res.candidates) > 1:
+        print("other candidates:")
+        for la, lo, co in res.candidates[1:]:
+            print(f"  {la:.5f}, {lo:.5f}  cost {co:.2e} ({co / res.cost:.1f}x)")
     out = {"lat": res.lat, "lon": res.lon, "t_start": res.t_start, "t_start_iso": start, "cost": res.cost,
-           "assignments": [a.__dict__ for a in res.assignments]}
+           "observer_alt": res.observer_alt, "assignments": [a.__dict__ for a in res.assignments],
+           "candidates": res.candidates}
     Path(args.out).write_text(json.dumps(out, indent=2))
     if args.plot:
         from .plot import plot_cost_map
@@ -204,6 +235,14 @@ def main(argv=None):
     p.add_argument("--dt", type=float, default=0.5, help="time resolution, s")
     p.add_argument("--c", type=float, default=DEFAULT_SPEED_OF_SOUND, help="speed of sound, m/s")
     p.add_argument("--only", help="comma-separated curve names to use")
+    p.add_argument("--types", help="keep only these aircraft classes, e.g. prop,heli,unknown")
+    p.add_argument("--cpa-slack", type=float, default=2.0, help="per-curve timing slack, s")
+    p.add_argument("--no-fit-gate", action="store_true", help="don't gate flights by fitted speed / CPA distance")
+    p.add_argument("--silence-km", type=float, help="penalise spots where an unmatched flight passed this close")
+    p.add_argument("--recording-s", type=float, help="recording length, s (for the silence check)")
+    p.add_argument("--dem", help="terrain: .tif/.npz file or OpenTopoData dataset (srtm30m, eudem25m, ned10m)")
+    p.add_argument("--geoid-offset", type=float, default=0.0, help="geoid height to add to DEM heights, m")
+    p.add_argument("--candidates", type=int, default=3, help="coarse minima to refine")
     p.add_argument("--out", default="location.json")
     p.add_argument("--plot", help="save the cost map PNG")
     p.set_defaults(func=cmd_locate)

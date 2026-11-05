@@ -195,7 +195,8 @@ def create_app():
         out = []
         for tr in S.tracks:
             step = max(1, len(tr.t) // 400)
-            out.append({"id": tr.ident, "label": tr.label, "t0": float(tr.t[0]), "t1": float(tr.t[-1]),
+            out.append({"id": tr.ident, "label": tr.label, "type": tr.typecode, "category": tr.category,
+                        "t0": float(tr.t[0]), "t1": float(tr.t[-1]),
                         "path": [[round(float(a), 5), round(float(b), 5)] for a, b in zip(tr.lat[::step], tr.lon[::step])]})
         return out
 
@@ -221,8 +222,23 @@ def create_app():
             S.tracks = tracks
         return jsonify(tracks=_tracks_json())
 
+    @app.post("/api/dem")
+    def upload_dem():
+        from ..elevation import DEM
+
+        f = request.files["file"]
+        suffix = Path(f.filename).suffix.lower()
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            f.save(tmp.name)
+            dem = DEM.load(tmp.name) if suffix == ".npz" else DEM.from_geotiff(tmp.name)
+        S.dem_file = dem
+        return jsonify(ok=True, name=f.filename, lat=[float(dem.lats.min()), float(dem.lats.max())],
+                       lon=[float(dem.lons.min()), float(dem.lons.max())])
+
     @app.post("/api/locate")
     def run_locate():
+        from ..aircraft_types import filter_tracks
+        from ..elevation import DEM
         from ..locate import locate
 
         d = request.get_json()
@@ -230,16 +246,36 @@ def create_app():
             raise ValueError("pick at least one curve (two or more to fix a point)")
         if not S.tracks:
             raise ValueError("load flight tracks first")
+        tracks = filter_tracks(S.tracks, d.get("types") or ("prop", "jet", "heli", "unknown"))
+        if not tracks:
+            raise ValueError("no flights left after the aircraft-type filter")
         use = d.get("use")
         curves = [c for i, c in enumerate(S.curves) if use is None or i in use]
-        res = locate(curves, S.tracks, (float(d["lat"]), float(d["lon"])), _parse_time(d["start"]),
-                     float(d.get("uncertainty", 300)), float(d.get("radius", 20)), float(d.get("step", 1000)),
-                     int(d.get("refine", 2)), float(d.get("alt", 0)), float(d.get("dt", 0.5)),
-                     float(d.get("c", 340)))
+        lat, lon, radius = float(d["lat"]), float(d["lon"]), float(d.get("radius", 20))
+        geoid = float(d.get("geoid", 0) or 0)
+        alt = float(d.get("alt", 0))
+        dem_choice = d.get("dem") or "none"
+        if dem_choice == "file":
+            if getattr(S, "dem_file", None) is None:
+                raise ValueError("upload a DEM file first")
+            alt = S.dem_file
+            alt.geoid_offset_m = geoid
+        elif dem_choice != "none":
+            cache = Path(tempfile.gettempdir()) / f"sgeo_dem_{dem_choice}_{lat:.3f}_{lon:.3f}_{radius:.0f}.npz"
+            alt = DEM.from_opentopodata(lat, lon, radius, dataset=dem_choice, cache=cache, geoid_offset_m=geoid)
+        rec_s = len(S.audio[0]) / S.audio[1] if S.audio else None
+        silence = float(d.get("silence_km") or 0) or None
+        res = locate(curves, tracks, (lat, lon), _parse_time(d["start"]),
+                     float(d.get("uncertainty", 300)), radius, float(d.get("step", 1000)),
+                     int(d.get("refine", 2)), alt, float(d.get("dt", 0.5)), float(d.get("c", 340)),
+                     cpa_slack_s=float(d.get("cpa_slack", 2)), fit_gate=bool(d.get("fit_gate", True)),
+                     silence_km=silence, recording_s=rec_s)
         S.result = res
-        glat, glon, cm = res.grid_lat, res.grid_lon, res.cost_map
+        glat, glon = res.grid_lat, res.grid_lon
         return jsonify(lat=res.lat, lon=res.lon, t_start=res.t_start, t_start_iso=_iso(res.t_start),
-                       cost=res.cost, assignments=[a.__dict__ for a in res.assignments],
+                       cost=res.cost, observer_alt=res.observer_alt,
+                       assignments=[a.__dict__ for a in res.assignments], candidates=res.candidates,
+                       n_tracks=len(tracks),
                        bounds=[[float(glat.min()), float(glon.min())], [float(glat.max()), float(glon.max())]],
                        truth=S.truth)
 

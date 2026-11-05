@@ -17,9 +17,27 @@ ADS-B tracks (OpenSky / CSV) ──► simulate Doppler at each candidate positi
 3. **Enhance**: remove stationary hum (per-frequency median over time), whiten broadband noise like wind and traffic (running median across frequency), and despeckle. Tonal aircraft lines (fan / propeller blade-passing tones and harmonics) remain.
 4. **Pick curves**: click one point on a line (`--seed T,F`) or draw a box around it (`--box T0,T1,F0,F1`). A Viterbi ridge tracker follows the line. It penalises changes of slope rather than slope itself, so it handles steep sweeps and carries straight through places where other lines cross. Line strength is capped so a brighter crossing line is no reason to jump. By default the pitch may only fall, as it does in a single pass.
 5. **Simulate**: for a candidate listener position, solve the retarded-time equation `t − τ = |P(τ) − O| / c` along each flight's smoothed ADS-B track, and compute the received/emitted frequency ratio `c / (c − v·n)`.
-6. **Search**: on a grid of positions, slide all curves together along time (one shared unknown start time) against every candidate flight, fitting the unknown source tone frequency in closed form. Each curve takes its best-matching flight. The position and start time with the lowest total misfit win, then the grid is refined around them.
+6. **Search**: on a grid of positions, slide all curves together along time (one shared unknown start time) against every candidate flight, fitting the unknown source tone frequency in closed form. Each curve takes its best-matching flight. The position and start time with the lowest total misfit win. The best few separated spots on the coarse grid are each refined, and the lowest cost wins.
+
+The search follows the method described in colsto's video "This background sound leaks your exact location":
+
+* **Locked multi-event scoring.** The passes share one clock, so the physical delay between them stays fixed. Each pass may still slide by a small timing slack (`--cpa-slack`, default 2 s) to absorb error in measuring its closest-approach time, and its tone frequency is fitted freely.
+* **Speed and distance gate.** A straight-flyover fit of each curve gives the aircraft's speed and closest slant distance. A curve is only matched to flights with a similar ground speed, and only at spots where that flight's closest approach is consistent with the fitted distance.
+* **Aircraft type filter** (`--types prop,heli,unknown`). ICAO type codes are classed as propeller, jet or helicopter. Propellers and helicopters give the clearest tones.
+* **Terrain** (`--dem srtm30m`, a GeoTIFF, or .npz). Each candidate's height comes from a DEM.
+* **Silence check** (`--silence-km 2 --recording-s 360`). A spot is penalised if a flight that matches none of your curves would have passed within that distance during the recording, because you would have heard it.
 
 `sgeo fit` also fits a straight-flyover model to each curve on its own (tone frequency, speed, closest-approach time and slant range). It is a quick sanity check that a picked line really is an aircraft pass, and needs no flight data.
+
+## GUI
+
+```bash
+sgeo gui        # opens http://127.0.0.1:8765
+```
+
+Open a recording, click on the falling lines to trace them, load flight tracks, click the map to set the search centre, then press **Find location**. The demo button loads a synthetic case with a known answer. Everything runs locally, and the map tiles are the only thing loaded from the internet.
+
+![GUI](docs/gui.png)
 
 ## Install
 
@@ -71,7 +89,7 @@ Use tracks covering a few minutes before and after the recording. The sound hear
 ## Accuracy and limits
 
 * **Speed of sound** (`--c`, default 340 m/s) varies with temperature, and wind shifts the curves. Both bias the result by hundreds of metres. Set `--c` from the local temperature when you know it (331.3 + 0.606·T°C).
-* **Observer altitude** (`--alt`) should be on the same datum as the track altitudes (OpenSky `geoaltitude` is height above the ellipsoid).
+* **Observer altitude** (`--alt` or `--dem`) should be on the same datum as the track altitudes. OpenSky `geoaltitude` is height above the WGS84 ellipsoid, while DEM heights are above sea level. Add the local geoid height with `--geoid-offset` (about +45 m in northern Italy).
 * **Geometry matters.** Two passes on crossing tracks give a sharp fix. Two passes along the same route leave a long ambiguous strip.
 * The ADS-B track has to cover each picked curve (80% by default). Aircraft without ADS-B (many small planes and helicopters) cannot be matched.
 
@@ -84,7 +102,10 @@ Use tracks covering a few minutes before and after the recording. The sound hear
 | `extract.py` | ridge tracking (box or seed), curve cleaning, JSON I/O |
 | `doppler.py` | retarded-time Doppler simulation, straight-flyover fit |
 | `flights.py` | track model (smoothing spline in ECEF), CSV/OpenSky loaders |
-| `locate.py` | position × start-time search with closed-form tone fit |
+| `locate.py` | position × start-time search: locked multi-event scoring, gates, silence check |
+| `aircraft_types.py` | ICAO type code → propeller / jet / helicopter |
+| `elevation.py` | DEM from OpenTopoData, GeoTIFF or .npz |
+| `gui/` | local web interface (`sgeo gui`) |
 | `synth.py` | synthetic flights and recordings for tests and demo |
 | `cli.py` | `sgeo` command |
 

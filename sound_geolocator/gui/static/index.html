@@ -42,6 +42,7 @@
   .seg { display:inline-flex; border:1px solid var(--line); border-radius:6px; overflow:hidden; }
   .seg button { border:none; border-radius:0; }
   .seg button.on { background:var(--accent); color:#000; }
+  .types { display:grid; grid-template-columns:1fr 1fr; }
   .chk { display:flex; gap:6px; align-items:center; font-size:12px; color:var(--muted); margin-top:6px; }
   .spin { display:inline-block; width:12px; height:12px; border:2px solid var(--muted); border-top-color:transparent; border-radius:50%; animation:s 0.8s linear infinite; vertical-align:-2px; margin-right:6px; }
   @keyframes s { to { transform:rotate(360deg); } }
@@ -100,6 +101,35 @@
     <div><label>your alt m</label><input id="alt" type="number" value="0"></div>
     <div><label>sound m/s</label><input id="c" type="number" value="340"></div>
   </div>
+  <label>aircraft to consider</label>
+  <div class="types">
+    <label class="chk"><input type="checkbox" class="ty" value="prop" checked> propeller</label>
+    <label class="chk"><input type="checkbox" class="ty" value="heli" checked> helicopter</label>
+    <label class="chk"><input type="checkbox" class="ty" value="jet" checked> jet</label>
+    <label class="chk"><input type="checkbox" class="ty" value="unknown" checked> unknown type</label>
+  </div>
+  <details style="margin-top:8px">
+    <summary class="sub" style="cursor:pointer">Advanced</summary>
+    <div class="row">
+      <div><label>timing slack per pass s</label><input id="slack" type="number" value="2" step="0.5"></div>
+      <div><label>silence check km</label><input id="silence" type="number" value="" placeholder="off"></div>
+    </div>
+    <label class="chk"><input id="fitGate" type="checkbox" checked> gate flights by fitted speed and distance</label>
+    <label>terrain (DEM)</label>
+    <select id="dem" style="width:100%;background:#0d0f13;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px">
+      <option value="none">none: use "your alt m"</option>
+      <option value="srtm30m">SRTM 30 m (worldwide, OpenTopoData)</option>
+      <option value="eudem25m">EU-DEM 25 m (Europe, OpenTopoData)</option>
+      <option value="ned10m">NED 10 m (USA, OpenTopoData)</option>
+      <option value="file">uploaded GeoTIFF / .npz</option>
+    </select>
+    <div class="row" style="margin-top:6px">
+      <label class="btn" for="demFile" style="margin:0">Upload DEM…</label>
+      <div><input id="geoid" type="number" placeholder="geoid offset m" title="Geoid height to add to DEM heights so they match ADS-B geometric altitude (≈ +45 m in northern Italy)"></div>
+    </div>
+    <input id="demFile" type="file" accept=".tif,.tiff,.npz">
+    <div id="demInfo" class="sub"></div>
+  </details>
   <button id="locateBtn" class="primary" style="width:100%;margin-top:12px">Find location</button>
   <div id="result"></div>
 </aside>

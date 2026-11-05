@@ -81,3 +81,38 @@ def test_locate_two_passes(scenario):
     assert haversine_m(res.lat, res.lon, LAT0, LON0) < 400
     assert abs(res.t_start - T0) < 3
     assert [a.flight for a in res.assignments] == ["A1B2C3", "D4E5F6"]
+
+
+def test_aircraft_type_filter(tmp_path):
+    from sound_geolocator.aircraft_types import classify, filter_tracks
+
+    assert [classify(x) for x in ("AT76", "A320", "EC35", "C172", "ZZZZ")] == ["prop", "jet", "heli", "prop", "unknown"]
+    fl, _, _ = demo_scenario()
+    save_tracks_csv(fl, tmp_path / "t.csv")
+    back = load_tracks_csv(tmp_path / "t.csv")
+    assert {t.typecode for t in back} == {"AT76", "DH8D", "A320"}
+    assert {t.ident for t in filter_tracks(back, ("prop",))} == {"a1b2c3", "d4e5f6"}
+
+
+def test_silence_and_dem(scenario):
+    """An unheard flight passing close during the recording penalises the area under it,
+    and a DEM callable works as the observer altitude."""
+    from sound_geolocator.elevation import DEM
+
+    fl, spec = scenario
+    c1 = clean_curve(track_ridge(spec, 60, 145, 40, 170, name="A"))
+    c2 = clean_curve(trace_from_seed(spec, 200, 125, name="B"))
+    # a silent helicopter crossing 4 km south of the listener during the recording
+    heli = straight_track("ccc111", LAT0, LON0, T0 - 300, -20000, -4000, 90, 60, 300, duration=1200,
+                          typecode="EC35")
+    dem = DEM([LAT0 - 1, LAT0 + 1], [LON0 - 1, LON0 + 1], np.full((2, 2), ALT0), height_above_ground_m=0)
+    kw = dict(t_uncertainty=30, radius_km=8, grid_step_m=1000, refine_levels=1, observer_alt_m=dem,
+              verbose=False, recording_s=360, n_candidates=1)
+    quiet = locate([c1, c2], fl[:2] + [heli], (LAT0, LON0), T0 + 10, silence_km=2.0, **kw)
+    loud = locate([c1, c2], fl[:2] + [heli], (LAT0, LON0), T0 + 10, **kw)
+    diff = quiet.cost_map - loud.cost_map
+    assert diff.max() == pytest.approx(0.01, rel=0.01)  # penalised somewhere (under the helicopter)
+    e, n = lla_to_enu_offsets(LAT0, LON0, quiet.grid_lat, quiet.grid_lon)
+    assert np.all(diff[np.abs(n + 4000) > 3500] == 0)  # ...and only near its path
+    assert haversine_m(quiet.lat, quiet.lon, LAT0, LON0) < 400
+    assert quiet.observer_alt == pytest.approx(ALT0)
