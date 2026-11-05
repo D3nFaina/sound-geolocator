@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sound Geolocator</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/leaflet/leaflet.css">
+<script src="/static/leaflet/leaflet.js"></script>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --text:#e6e8ee; --muted:#9aa3b2; --accent:#4cc9f0; --warn:#f8961e; --ok:#80ed99; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:var(--bg); color:var(--text); display:grid; grid-template-columns:340px 1fr; height:100vh; }
+  aside { background:var(--panel); border-right:1px solid var(--line); overflow-y:auto; padding:14px 16px 40px; }
+  main { display:grid; grid-template-rows:minmax(260px, 48%) 1fr; min-width:0; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:18px 0 8px; display:flex; gap:8px; align-items:center; }
+  h2 .n { background:var(--accent); color:#000; border-radius:50%; width:20px; height:20px; display:inline-grid; place-items:center; font-size:12px; }
+  .sub { color:var(--muted); font-size:12px; margin:0 0 6px; }
+  label { display:block; font-size:12px; color:var(--muted); margin:6px 0 2px; }
+  input[type=text], input[type=number] { width:100%; background:#0d0f13; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font:inherit; }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .row3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; }
+  button, .btn { background:#252a35; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 10px; font:inherit; cursor:pointer; display:inline-block; }
+  button:hover, .btn:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); color:#000; border:none; font-weight:600; }
+  button:disabled { opacity:.5; cursor:default; }
+  input[type=file] { display:none; }
+  .curves { list-style:none; padding:0; margin:6px 0; }
+  .curves li { border:1px solid var(--line); border-radius:6px; padding:6px 8px; margin-bottom:6px; display:grid; grid-template-columns:auto 1fr auto; gap:8px; align-items:center; font-size:12px; }
+  .swatch { width:12px; height:12px; border-radius:3px; }
+  .curves .meta { color:var(--muted); }
+  .x { background:none; border:none; color:var(--muted); cursor:pointer; font-size:16px; padding:0 4px; }
+  #specwrap { position:relative; border-bottom:1px solid var(--line); }
+  #spec { width:100%; height:100%; display:block; cursor:crosshair; }
+  #readout { position:absolute; right:10px; top:8px; background:#000a; padding:3px 8px; border-radius:4px; font:12px ui-monospace, monospace; pointer-events:none; }
+  #hint { position:absolute; left:70px; top:8px; color:var(--muted); font-size:12px; pointer-events:none; }
+  #map { width:100%; height:100%; }
+  #status { position:fixed; bottom:12px; left:356px; background:#000c; border:1px solid var(--line); padding:8px 12px; border-radius:6px; display:none; max-width:60vw; z-index:1000; }
+  #status.err { border-color:#e63946; color:#ffb3b8; }
+  .result { border:1px solid var(--ok); border-radius:8px; padding:8px 10px; margin-top:10px; font-size:13px; }
+  .result a { color:var(--accent); }
+  .seg { display:inline-flex; border:1px solid var(--line); border-radius:6px; overflow:hidden; }
+  .seg button { border:none; border-radius:0; }
+  .seg button.on { background:var(--accent); color:#000; }
+  .chk { display:flex; gap:6px; align-items:center; font-size:12px; color:var(--muted); margin-top:6px; }
+  .spin { display:inline-block; width:12px; height:12px; border:2px solid var(--muted); border-top-color:transparent; border-radius:50%; animation:s 0.8s linear infinite; vertical-align:-2px; margin-right:6px; }
+  @keyframes s { to { transform:rotate(360deg); } }
+</style>
+</head>
+<body>
+<aside>
+  <h1>Sound Geolocator</h1>
+  <p class="sub">Find where a recording was made from the Doppler curves of planes overhead.</p>
+  <button id="demoBtn">Load the synthetic demo</button>
+
+  <h2><span class="n">1</span>Recording</h2>
+  <label class="btn" for="audioFile">Open audio or video…</label>
+  <input id="audioFile" type="file" accept="audio/*,video/*,.wav,.mp3,.m4a,.flac,.ogg,.mp4,.mov,.mkv,.webm">
+  <div id="audioName" class="sub" style="margin-top:6px"></div>
+  <div class="row3">
+    <div><label>min Hz</label><input id="fmin" type="number" value="20"></div>
+    <div><label>max Hz</label><input id="fmax" type="number" value="1000"></div>
+    <div><label>window s</label><input id="win" type="number" value="1.0" step="0.25"></div>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <button id="reSpec">Update spectrogram</button>
+    <div class="seg"><button id="vEnh" class="on">Enhanced</button><button id="vRaw">Raw</button></div>
+  </div>
+
+  <h2><span class="n">2</span>Doppler curves</h2>
+  <p class="sub"><b>Click</b> on a falling line to trace it. <b>Shift-drag</b> a box around a line instead when lines are tangled. Scroll to zoom, double-click to reset. Pick at least two passes.</p>
+  <label class="chk"><input id="allowRise" type="checkbox"> allow rising pitch (turning or climbing aircraft)</label>
+  <ul id="curves" class="curves"></ul>
+  <div class="row">
+    <a class="btn" href="/api/curves.json" download>Export curves</a>
+    <label class="btn" for="curvesFile">Import curves</label>
+  </div>
+  <input id="curvesFile" type="file" accept=".json">
+
+  <h2><span class="n">3</span>Flights</h2>
+  <p class="sub">ADS-B tracks around the place and time: a CSV with time, icao24, lat, lon, altitude (OpenSky / ADS-B Exchange exports work).</p>
+  <label class="btn" for="tracksFile">Open flight tracks…</label>
+  <input id="tracksFile" type="file" accept=".csv,.json">
+  <button id="openskyBtn" title="Recent data only (about the last hour)">Fetch from OpenSky</button>
+  <div id="tracksInfo" class="sub" style="margin-top:6px"></div>
+
+  <h2><span class="n">4</span>Search</h2>
+  <p class="sub">Click the map to set the search centre.</p>
+  <div class="row">
+    <div><label>centre lat</label><input id="lat" type="text"></div>
+    <div><label>centre lon</label><input id="lon" type="text"></div>
+  </div>
+  <div class="row">
+    <div><label>radius km</label><input id="radius" type="number" value="20"></div>
+    <div><label>grid step m</label><input id="step" type="number" value="1000"></div>
+  </div>
+  <label>approx. recording start (UTC, ISO or unix)</label><input id="start" type="text" placeholder="2025-06-01T14:03:00Z">
+  <div class="row3">
+    <div><label>± seconds</label><input id="unc" type="number" value="300"></div>
+    <div><label>your alt m</label><input id="alt" type="number" value="0"></div>
+    <div><label>sound m/s</label><input id="c" type="number" value="340"></div>
+  </div>
+  <button id="locateBtn" class="primary" style="width:100%;margin-top:12px">Find location</button>
+  <div id="result"></div>
+</aside>
+<main>
+  <div id="specwrap"><canvas id="spec"></canvas><div id="readout"></div><div id="hint">Load a recording or the demo to begin</div></div>
+  <div id="map"></div>
+</main>
+<div id="status"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

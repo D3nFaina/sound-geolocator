@@ -150,6 +150,12 @@ def cmd_demo(args):
     runpy.run_path(str(demo), run_name="__main__")
 
 
+def cmd_gui(args):
+    from .gui.app import main as gui_main
+
+    gui_main(args.host, args.port, not args.no_browser)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="sgeo", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -205,6 +211,12 @@ def main(argv=None):
     p = sub.add_parser("demo", help="run the synthetic end-to-end demo")
     p.add_argument("--out", default="demo_out")
     p.set_defaults(func=cmd_demo)
+
+    p = sub.add_parser("gui", help="open the point-and-click web interface")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--no-browser", action="store_true")
+    p.set_defaults(func=cmd_gui)
 
     args = ap.parse_args(argv)
     args.func(args)

@@ -9,7 +9,7 @@ description = "Estimate where a recording was made from the Doppler curves of ai
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
-dependencies = ["numpy>=1.24", "scipy>=1.10", "soundfile>=0.12", "matplotlib>=3.7", "requests>=2.28"]
+dependencies = ["numpy>=1.24", "scipy>=1.10", "soundfile>=0.12", "matplotlib>=3.7", "requests>=2.28", "flask>=2.3"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
@@ -18,4 +18,7 @@ dev = ["pytest>=7"]
 sgeo = "sound_geolocator.cli:main"
 
 [tool.setuptools]
-packages = ["sound_geolocator"]
+packages = ["sound_geolocator", "sound_geolocator.gui"]
+
+[tool.setuptools.package-data]
+"sound_geolocator.gui" = ["static/*", "static/leaflet/*", "static/leaflet/images/*"]
