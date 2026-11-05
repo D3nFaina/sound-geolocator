@@ -175,6 +175,21 @@
   <div id="result"></div>
   <button id="worldBtn" style="width:100%;margin-top:8px" title="Needs the whole-day archive (step 3) and at least two fitted passes">Search worldwide (whole day, any country)</button>
   <div id="worldRes"></div>
+  <h3 style="margin:14px 0 4px">Places that could hear the ticked passes</h3>
+  <p class="sub">Every 2 km cell and start time where real flights match each ticked pass (speed and closest distance within the fit errors), then the <b>silence filter</b>: a place is dropped when another aircraft came within the slant distance below during the quiet stretch between two passes.</p>
+  <div class="row">
+    <div><label>area</label><select id="areaSel" style="width:100%;background:#0d0f13;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px"><option value="conus">continental US</option><option value="world">worldwide</option></select></div>
+    <div><label>wind allowance m/s</label><input id="areaWind" type="number" value="15"></div>
+  </div>
+  <label class="chk"><input id="areaSilence" type="checkbox" checked> silence filter between passes; heard within slant km:</label>
+  <div class="row">
+    <div><label>propeller</label><input id="r_prop" type="number" value="3.5" step="0.5"></div>
+    <div><label>helicopter</label><input id="r_heli" type="number" value="3.5" step="0.5"></div>
+    <div><label>jet</label><input id="r_jet" type="number" value="6" step="0.5"></div>
+    <div><label>unknown</label><input id="r_unknown" type="number" value="4.5" step="0.5"></div>
+  </div>
+  <button id="areaBtn" style="width:100%;margin-top:6px" title="Needs the whole-day archive (step 3) and at least two fitted, ticked passes">Find places that hear the passes</button>
+  <div id="areaRes" class="sub"></div>
   <h2><span class="n">5</span>Candidates on the sound map</h2>
   <p class="sub">Draw the predicted Doppler lines of the real flights for a place and start time on top of the spectrogram, to check them against what you hear. Use the search centre and start time above, or the <b>on spectrogram</b> buttons of a result. Each flight's tone is set from the pass it overlaps best.</p>
   <button id="predictHere" style="width:100%">Show flights at the search centre</button>

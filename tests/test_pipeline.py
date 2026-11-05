@@ -178,6 +178,10 @@ def test_day_archive_and_world_search(tmp_path):
     best = min(cands[:3], key=lambda w: haversine_m(w.lat, w.lon, truth[0], truth[1]))
     assert haversine_m(best.lat, best.lon, truth[0], truth[1]) < 6000
     assert abs(best.t_start - t0) < 60
+    # silence filter: loud while pass 1 is overhead, quiet once both have gone
+    R = {"prop": 5000, "jet": 7000, "heli": 5000, "unknown": 6000}
+    assert not day.silence_ok([best], 90, 110, R)[0]
+    assert day.silence_ok([best], 300, 360, {"prop": 1500, "jet": 1500, "heli": 1500, "unknown": 1500})[0]
 
 
 def test_predicted_flight_curves_match_passes():

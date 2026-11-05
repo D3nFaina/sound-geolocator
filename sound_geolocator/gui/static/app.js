@@ -188,7 +188,7 @@ async function fitCurve(i) {
   try {
     const j = await post(`/api/curves/${i}/fit`, {}); setCurves(j.curves);
     const c = curves[i];
-    status(`${c.name}: closest at ${fmtT(c.fit.t_cpa, 0.1)}, ${Math.round(c.fit.speed)} m/s, ${(c.fit.d_cpa / 1000).toFixed(2)} km, tone ${c.fit.f0} Hz (fit rms ${c.fit.rms_hz} Hz)`);
+    status(`${c.name}: closest at ${fmtT(c.fit.t_cpa, 0.1)} ±${(c.fit.t_cpa_err || 0).toFixed(1)} s, ${c.fit.speed.toFixed(1)} ±${(c.fit.speed_err || 0).toFixed(1)} m/s, ${(c.fit.d_cpa / 1000).toFixed(2)} ±${((c.fit.d_cpa_err || 0) / 1000).toFixed(2)} km, tone ${c.fit.f0.toFixed(1)} Hz (fit rms ${c.fit.rms_hz} Hz; ± = 1σ statistical)`);
   } catch (err) { status(err.message, true); }
 }
 
@@ -271,7 +271,8 @@ function setCurves(cs, bump = true) {
   const ul = $('curves'); ul.innerHTML = '';
   cs.forEach((c, i) => {
     const li = document.createElement('li'); if (i === sel) li.className = 'sel';
-    const fit = c.fit ? `closest ${fmtT(c.fit.t_cpa, 0.1)} · ${Math.round(c.fit.speed)} m/s · ${(c.fit.d_cpa / 1000).toFixed(2)} km · ${c.fit.f0} Hz · rms ${c.fit.rms_hz} Hz` : `${c.n} points, not fitted yet`;
+    const pm = (k, dig = 1, sc = 1) => (c.fit[k + '_err'] != null && isFinite(c.fit[k + '_err']) ? `±${(c.fit[k + '_err'] / sc).toFixed(dig)}` : '');
+    const fit = c.fit ? `closest ${fmtT(c.fit.t_cpa, 0.1)} ${pm('t_cpa', 1)} s · ${c.fit.speed.toFixed(1)} ${pm('speed', 1)} m/s · ${(c.fit.d_cpa / 1000).toFixed(2)} ${pm('d_cpa', 2, 1000)} km · ${c.fit.f0.toFixed(1)} ${pm('f0', 1)} Hz · rms ${c.fit.rms_hz} Hz` : `${c.n} points, not fitted yet`;
     li.innerHTML = `<span class="swatch" style="background:${COLORS[i % COLORS.length]}"></span>
       <div><input class="nm" value="${c.name}" style="width:8em;padding:2px 4px"> <span class="meta">${c.t.length ? fmtT(c.t[0], 1) + '–' + fmtT(c.t[c.t.length - 1], 1) : ''}</span>
       <span class="badge ${c.fit ? 'ok' : 'todo'}">${c.fit ? 'fitted' : 'digitised'}</span>
@@ -309,8 +310,8 @@ layers['Satellite (Esri)'].addTo(map);
 // flights per aircraft type, each a map overlay that can be switched on and off
 const CAT = { prop: ['Flights: propeller', '#80ed99'], jet: ['Flights: jet', '#c0c6d0'], heli: ['Flights: helicopter', '#ffd166'], unknown: ['Flights: unknown type', '#8a93a3'] };
 const trackLayers = Object.fromEntries(Object.keys(CAT).map((k) => [k, L.layerGroup().addTo(map)]));
-const resultLayer = L.layerGroup().addTo(map), worldLayer = L.layerGroup().addTo(map);
-const mapOverlays = { ...Object.fromEntries(Object.entries(CAT).map(([k, [name, col]]) => [`<span style="color:${col}">━</span> ${name}`, trackLayers[k]])), 'Location result': resultLayer, 'Worldwide candidates': worldLayer };
+const resultLayer = L.layerGroup().addTo(map), worldLayer = L.layerGroup().addTo(map), areaLayer = L.layerGroup().addTo(map);
+const mapOverlays = { ...Object.fromEntries(Object.entries(CAT).map(([k, [name, col]]) => [`<span style="color:${col}">━</span> ${name}`, trackLayers[k]])), 'Location result': resultLayer, 'Worldwide candidates': worldLayer, 'Places that hear the passes': areaLayer };
 L.control.layers(layers, mapOverlays, { position: 'topright', collapsed: false }).addTo(map);
 L.control.scale({ imperial: false }).addTo(map);
 let centerMarker = null, searchBox = null;
@@ -498,6 +499,41 @@ function showWorld(cs) {
   const pts = cs.map((c) => [c.lat ?? c.vote.lat, c.lon ?? c.vote.lon]);
   map.fitBounds(L.latLngBounds(pts).pad(0.3));
 }
+$('areaBtn').onclick = async () => {
+  const btn = $('areaBtn'); btn.disabled = true; status('Finding places that hear every ticked pass…', false, true); const stop = pollProgress('Places');
+  try {
+    const body = { area: $('areaSel').value, wind: +$('areaWind').value, silence: $('areaSilence').checked, c: +$('c').value };
+    for (const k of ['prop', 'heli', 'jet', 'unknown']) body['r_' + k] = +$('r_' + k).value;
+    const j = await post('/api/day/area', body);
+    stop(); showArea(j);
+  } catch (err) { stop(); status(err.message, true); }
+  btn.disabled = false;
+};
+function timeColor(x) { // 0..1 -> blue, cyan, green, yellow, red
+  const s = [[49, 54, 149], [69, 117, 180], [116, 173, 209], [171, 217, 233], [254, 224, 144], [253, 174, 97], [244, 109, 67], [215, 48, 39]];
+  const p = Math.max(0, Math.min(1, x)) * (s.length - 1), i = Math.min(Math.floor(p), s.length - 2), f = p - i;
+  return `rgb(${s[i].map((v, k) => Math.round(v + f * (s[i + 1][k] - v))).join(',')})`;
+}
+function showArea(j) {
+  areaLayer.clearLayers();
+  const pts = j.points, box = $('areaRes');
+  const names = j.passes.map((p) => p.name).join('+');
+  const gaps = j.gaps.map(([a, b]) => `${Math.round(a)}–${Math.round(b)} s`).join(', ') || 'none';
+  if (!pts.length) { box.innerHTML = `${j.n_all.toLocaleString()} place/time matches for ${names}, none left after the silence filter (quiet gaps ${gaps}).`; status('No place left'); return; }
+  const t0 = pts[0].t0, t1 = Math.max(...pts.map((p) => p.t1)), span = Math.max(t1 - t0, 1);
+  const rend = L.canvas({ padding: 0.3 });
+  for (const p of pts) {
+    const mid = (p.t0 + p.t1) / 2;
+    L.circleMarker([p.lat, p.lon], { renderer: rend, radius: 3, stroke: false, fillOpacity: 0.85, fillColor: timeColor((mid - t0) / span) })
+      .bindTooltip(`${p.lat.toFixed(3)}, ${p.lon.toFixed(3)}<br>start ${p.t0_iso.slice(11, 19)}${p.t1 > p.t0 ? '–' + p.t1_iso.slice(11, 19) : ''} UTC<br>${p.n} start time(s)`)
+      .on('click', () => { setCenter(p.lat, p.lon); $('start').value = p.t0_iso; $('unc').value = 60; $('radius').value = 8; })
+      .addTo(areaLayer);
+  }
+  const iso = (t) => new Date(t * 1000).toISOString().slice(11, 16);
+  box.innerHTML = `<b>${pts.length.toLocaleString()}</b> places (2 km cells) for ${names}: ${j.n_all.toLocaleString()} place/time matches, ${j.n_quiet.toLocaleString()} quiet in the gaps (${gaps})${j.truncated ? ', first 40,000 shown' : ''}.<br>Colour = recording start, <span style="color:${timeColor(0)}">■</span> ${iso(t0)} → <span style="color:${timeColor(1)}">■</span> ${iso(t1)} UTC. Click a dot to make it the search centre.`;
+  map.fitBounds(L.latLngBounds(pts.map((p) => [p.lat, p.lon])).pad(0.1));
+  status(`${pts.length} places`);
+}
 // remember the paths typed last time
 for (const id of ['path', 'histPath', 'dayPath']) { const v = localStorage.getItem(id); if (v && !$(id).value) $(id).value = v; $(id).addEventListener('change', () => localStorage.setItem(id, $(id).value)); }
 
@@ -523,6 +559,9 @@ const MODEL = [
   ['p', 'Weak peaks, peaks on the band edge, and points more than 2 Hz off a running median are dropped. Then the four parameters are found by robust non-linear least squares (soft-L1 loss, so a few stray points barely matter), started from several distances to avoid a wrong local minimum:'],
   ['d', '\\min_{f_0,\\,t_\\mathrm{cpa},\\,v,\\,d}\\ \\sum_j \\big(\\hat f_j - f(t_j;\\,f_0, t_\\mathrm{cpa}, v, d)\\big)^2'],
   ['p', 'The rms residual (Hz) says how well a straight flyover explains the points. A turning or climbing aircraft fits worse.'],
+  ['p', 'Error bars (±, one sigma) come from the curvature of the misfit at the best fit: with $J$ the Jacobian of the model at the fitted parameters and $s^2$ the residual variance,'],
+  ['d', '\\Sigma = s^2\\,(J^\\top J)^{-1}\\,\\frac{1+\\rho}{1-\\rho}, \\qquad \\sigma_k = \\sqrt{\\Sigma_{kk}}'],
+  ['p', 'where $\\rho$ is the correlation of neighbouring residuals (overlapping spectrogram frames, a wobbling aircraft), which reduces the effective number of independent points. These are statistical errors only. Wind (the fit gives speed through the air, ADS-B gives ground speed), the speed of sound (temperature) and a not-quite-straight flight add systematic errors, so searches use wider windows than the ± values.'],
   ['h3', '6. Finding the place'],
   ['p', 'For a candidate listener position $\\mathbf{O}$ (a grid over the search area, with the ground height from a DEM) and recording start $T$, every flight $k$ predicts a curve shape $r_k(t) = c / (c - v_r)$. Each pass $j$ is compared with each flight, solving for its unknown tone in closed form:'],
   ['d', '\\hat f_{0} = \\frac{\\sum_i \\hat f_i\\, r_k(t_i)}{\\sum_i r_k(t_i)^2}, \\qquad \\mathrm{cost}_{jk} = \\frac{\\sqrt{\\tfrac1n \\sum_i (\\hat f_i - \\hat f_0\\, r_k(t_i))^2}}{\\hat f_0}'],

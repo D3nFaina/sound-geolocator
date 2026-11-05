@@ -436,9 +436,127 @@ class DayArchive:
                     total += np.where(uk[pos] == q, cnt[pos], 0)
         return total
 
+    def silence_violations(self, lat, lon, t0, t1, radius_m, exclude=()):
+        """Aircraft (icao, closest slant m, unix time) that came within ``radius_m`` of (lat, lon) between t0 and t1.
+
+        The slant distance assumes ground at sea level, which is the largest it
+        can be, so a hit here is certain (as far as ADS-B saw it).
+        """
+        a, b = t0 - self.day0, t1 - self.day0
+        r_deg = radius_m / 111200.0
+        coslat = max(np.cos(np.radians(lat)), 0.05)
+        bx = self.box
+        dlon_w = ((bx[:, 2] - lon + 180) % 360) - 180, ((bx[:, 3] - lon + 180) % 360) - 180
+        cand = np.nonzero((bx[:, 4] <= b) & (bx[:, 5] >= a) & (bx[:, 0] <= lat + r_deg) & (bx[:, 1] >= lat - r_deg)
+                          & (dlon_w[0] <= r_deg / coslat) & (dlon_w[1] >= -r_deg / coslat))[0]
+        hits = []
+        for i in cand:
+            icao = self.meta[i][0]
+            if icao in exclude:
+                continue
+            sl = self._points(i)
+            t = np.asarray(self.t[sl])
+            m = (t >= a) & (t <= b)
+            if not m.any():
+                continue
+            dn = (np.asarray(self.lat[sl])[m] - lat) * 111200.0
+            de = (((np.asarray(self.lon[sl])[m] - lon + 180) % 360) - 180) * 111200.0 * coslat
+            slant = np.sqrt(dn ** 2 + de ** 2 + np.asarray(self.alt[sl], float)[m] ** 2)
+            k = int(np.argmin(slant))
+            if slant[k] < radius_m:
+                hits.append((icao, float(slant[k]), float(t[m][k] + self.day0)))
+        return hits
+
+    def silence_ok(self, cands, w0, w1, radius_m, cell_km=2.0, minute=60.0, progress=None):
+        """For each candidate, True if no aircraft came close enough to be heard between w0 and w1.
+
+        ``w0``/``w1`` are seconds into the recording (the quiet gap, e.g. from the
+        end of pass B to the start of pass C). ``radius_m`` is a slant distance,
+        either one number or a dict per aircraft category, e.g.
+        ``{"prop": 3500, "heli": 3500, "jet": 6000, "unknown": 4500}``: a small
+        propeller plane is only heard from close by, a jet from further.
+
+        Every aircraft position is spread over the ground cells within that
+        slant distance (ground at sea level, so the area is the largest it can
+        be), and a candidate is rejected when its own cell is "loud" during the
+        gap. Aircraft above the archive's altitude limit (7 km) never count.
+        """
+        cands = list(cands)
+        if not cands:
+            return np.zeros(0, bool)
+        if not isinstance(radius_m, dict):
+            radius_m = {k: float(radius_m) for k in ("prop", "jet", "heli", "unknown")}
+        rmax = max(radius_m.values())
+        cell_deg = cell_km / 111.2
+        lat_c = np.array([c.lat for c in cands])
+        lon_c = np.array([c.lon for c in cands])
+        t0 = np.array([c.t_start for c in cands]) - self.day0
+        a0, a1 = t0 + w0, t0 + w1
+        ci = np.floor(lat_c / cell_deg).astype(np.int64)
+        cj = np.floor(((lon_c + 180.0) % 360.0) / cell_deg).astype(np.int64)
+        ok = np.ones(len(cands), bool)
+        alt = np.asarray(self.alt)
+        low = np.nonzero(alt < rmax)[0]
+        ac = np.searchsorted(np.asarray(self.start), low, side="right") - 1
+        r_ac = np.array([radius_m.get(k, rmax) for k in self.category], float)
+        r_pt = r_ac[ac]
+        del ac
+        h = np.sqrt(np.maximum(r_pt ** 2 - alt[low].astype(float) ** 2, 0))
+        keep = h > 0
+        low, h = low[keep], h[keep]
+        tl = np.asarray(self.t)[low].astype(np.float64)
+        la = np.asarray(self.lat)[low].astype(np.float64)
+        lo = (np.asarray(self.lon)[low].astype(np.float64) + 180.0) % 360.0
+        # only the bounding box and times of the candidates matter
+        m = (la >= lat_c.min() - 0.2) & (la <= lat_c.max() + 0.2) & (tl >= a0.min() - minute) & (tl <= a1.max() + minute)
+        tl, la, lo, h = tl[m], la[m], lo[m], h[m]
+        b0 = np.floor(a0 / minute).astype(np.int64)
+        nb = int(np.ceil((w1 - w0) / minute)) + 1
+        # every (cell, minute) a candidate listens in, sorted; an aircraft marks the ones it is heard in
+        kk = np.arange(nb)
+        inwin = (b0[:, None] + kk[None, :]) * minute <= a1[:, None]
+        cq = ((ci << 40) | (cj << 20))[:, None] | (b0[:, None] + kk[None, :])
+        Q, inv = np.unique(cq[inwin], return_inverse=True)
+        loud = np.zeros(len(Q), bool)
+        # coarse presence grid of candidate cells, to skip most lookups cheaply
+        gi0, gj0 = ci.min(), cj.min()
+        grid = np.zeros((ci.max() - gi0 + 1, cj.max() - gj0 + 1), bool)
+        grid[ci - gi0, cj - gj0] = True
+        K = int(np.ceil(rmax / (cell_km * 1000))) + 1
+        Kj = int(np.ceil(K / max(np.cos(np.radians(np.abs(lat_c).max())), 0.05)))
+        chunk = 1_000_000
+        n = len(tl)
+        for c0 in range(0, n, chunk):
+            if progress:
+                progress(c0 / max(n, 1))
+            pi = la[c0:c0 + chunk] / cell_deg
+            pj = lo[c0:c0 + chunk] / cell_deg
+            hh = h[c0:c0 + chunk] + 0.7 * cell_km * 1000
+            coslat = np.maximum(np.cos(np.radians(la[c0:c0 + chunk])), 0.05)
+            tb = np.floor(tl[c0:c0 + chunk] / minute).astype(np.int64)
+            fi, fj = np.floor(pi).astype(np.int64), np.floor(pj).astype(np.int64)
+            for di in range(-K, K + 1):
+                ii = fi + di
+                dn = (ii + 0.5 - pi) * cell_deg * 111200.0
+                for dj in range(-Kj, Kj + 1):
+                    jj = fj + dj
+                    de = (jj + 0.5 - pj) * cell_deg * 111200.0 * coslat
+                    gi, gj = ii - gi0, jj - gj0
+                    m = (dn * dn + de * de <= hh * hh) & (gi >= 0) & (gi < grid.shape[0]) & (gj >= 0) & (gj < grid.shape[1])
+                    m[m] = grid[gi[m], gj[m]]
+                    if not m.any():
+                        continue
+                    q = (ii[m] << 40) | (jj[m] << 20) | tb[m]
+                    pos = np.minimum(np.searchsorted(Q, q), len(Q) - 1)
+                    hit = Q[pos] == q
+                    loud[pos[hit]] = True
+        bad = np.zeros(inwin.shape, bool)
+        bad[inwin] = loud[inv.ravel()]
+        return ok & ~bad.any(axis=1)
+
     def search_world(self, passes, t_lo=None, t_hi=None, speed_tol=0.4, dist_factor=1.4, cell_km=3.0, t_bin=20.0,
                      c=340.0, max_ground_m=1800.0, n_best=30, distinct=True,
-                     recording_s=3600.0, progress=None) -> list[WorldCandidate]:
+                     recording_s=3600.0, bbox=None, progress=None) -> list[WorldCandidate]:
         """Places and start times where aircraft match every fitted pass.
 
         ``passes``: list of dicts with ``t_cpa`` (s into the recording),
@@ -469,13 +587,17 @@ class DayArchive:
         trk_ok = np.isfinite(np.asarray(self.trk, np.float32))
         t_all = np.asarray(self.t, np.float32)
         starts = np.asarray(self.start)
+        if bbox is not None:
+            lat_all, lon_all = np.asarray(self.lat), np.asarray(self.lon)
         ac_of_pt = None
         # 1) per pass: which samples can vote, and for which start time
         sel = []
         for k, p in enumerate(passes):
             v, d, tc = float(p["speed"]), float(p["d_cpa"]), float(p["t_cpa"])
-            m = (gs_all >= v * (1 - speed_tol)) & (gs_all <= v * (1 + speed_tol))
-            m &= alt_all <= dist_factor * d + max_ground_m  # can't be further above the listener than d
+            v_lo, v_hi = float(p.get("speed_lo", v * (1 - speed_tol))), float(p.get("speed_hi", v * (1 + speed_tol)))
+            d_lo, d_hi = float(p.get("d_lo", d / dist_factor)), float(p.get("d_hi", d * dist_factor))
+            m = (gs_all >= v_lo) & (gs_all <= v_hi)
+            m &= alt_all <= d_hi + max_ground_m  # can't be further above the listener than d
             m &= trk_ok
             ts = t_all - np.float32(tc)
             m &= (ts >= lo_t - 2 * t_bin) & (ts <= hi_t + 2 * t_bin)
@@ -483,14 +605,17 @@ class DayArchive:
                 if ac_of_pt is None:
                     ac_of_pt = np.repeat(np.arange(len(self), dtype=np.int32), np.asarray(self.n))
                 m &= np.isin(self.category, list(p["types"]))[ac_of_pt]
+            if bbox is not None:
+                la_, lb_, oa_, ob_ = bbox
+                m &= (lat_all >= la_ - 0.2) & (lat_all <= lb_ + 0.2) & (lon_all >= oa_ - 0.3) & (lon_all <= ob_ + 0.3)
             idx = np.nonzero(m)[0]
-            sel.append((idx, ts[idx], d))
+            sel.append((idx, ts[idx], d_lo, d_hi))
             del m, ts
         del gs_all, alt_all, trk_ok
         ref = int(np.argmin([len(x[0]) for x in sel]))
 
         def votes_for(k, w0, w1):
-            idx, ts, d = sel[k]
+            idx, ts, dlo, dhi = sel[k]
             j = np.nonzero((ts >= w0) & (ts < w1))[0]
             idx, ts = idx[j], ts[j]
             la = np.asarray(self.lat)[idx].astype(np.float64)
@@ -501,7 +626,6 @@ class DayArchive:
             # horizontal offset of the listener: slant distance d (fit uncertain by dist_factor)
             # and height above the listener alt - ground, ground between 0 and max_ground_m
             alt = np.asarray(self.alt)[idx].astype(np.float64)
-            dlo, dhi = d / dist_factor, d * dist_factor
             hmin = np.sqrt(np.maximum(dlo ** 2 - alt ** 2, 0.0))
             hmax = np.sqrt(np.maximum(dhi ** 2 - np.maximum(alt - max_ground_m, 0.0) ** 2, 0.0))
             nf = int(np.clip(np.ceil(dhi / (cell_km * 1000)), 1, 6))
@@ -559,11 +683,17 @@ class DayArchive:
                 busy = self.low_traffic(rk[good], cell_deg, t_bin, recording_s)
                 score = (hits[good].astype(np.int64) * 10_000_000 - np.minimum(busy, 9_999) * 1000
                          + np.minimum(votes[good], 999))
-                for jj in np.argsort(-score)[: n_best * 20]:
+                cap = n_best * 20 if n_best else None
+                if not n_best:  # keep every place and time that matches all passes
+                    good_all = np.nonzero(hits[good] == len(passes))[0]
+                order = np.argsort(-score)[:cap] if n_best else good_all
+                for jj in order:
                     j = good[jj]
                     item = (int(score[jj]), int(rk[j]), int(hits[j]), int(votes[j]),
                             [int(match_who[k][j]) for k in range(len(passes))], int(busy[jj]))
-                    if len(heap) < n_best * 20:
+                    if not n_best:
+                        heap.append(item)
+                    elif len(heap) < cap:
                         heapq.heappush(heap, item)
                     elif item > heap[0]:
                         heapq.heapreplace(heap, item)
@@ -571,10 +701,12 @@ class DayArchive:
         # 3) best first, one candidate per neighbourhood
         out, seen = [], []
         for score, key, hits, votes, who, busy in sorted(heap, reverse=True):
-            if len(out) >= n_best:
+            if n_best and len(out) >= n_best:
                 break
             la, lo, tb = _unkey(key, cell_deg, t_bin)
-            if any(abs(la - s0) < 3 * cell_deg and abs(lo - s1) < 3 * cell_deg / max(np.cos(np.radians(la)), .05)
+            if bbox is not None and not (bbox[0] <= la <= bbox[1] and bbox[2] <= lo <= bbox[3]):
+                continue
+            if n_best and any(abs(la - s0) < 3 * cell_deg and abs(lo - s1) < 3 * cell_deg / max(np.cos(np.radians(la)), .05)
                    and abs(tb - s2) < 3 * t_bin for s0, s1, s2 in seen):
                 continue
             seen.append((la, lo, tb))

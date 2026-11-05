@@ -27,6 +27,9 @@ from ..spectrogram import compute_spectrogram, enhance
 STATIC = Path(__file__).parent / "static"
 
 
+# continental United States: lat_min, lat_max, lon_min, lon_max
+CONUS_BBOX = (24.5, 49.5, -125.0, -66.5)
+
 def _iso(t):
     return datetime.fromtimestamp(t, timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -99,7 +102,7 @@ def _curve_json(cv: DopplerCurve, i: int):
         except Exception:
             fit = None
         cv.meta["fit"] = fit
-    info["fit"] = None if fit is None else {k: round(v, 2) for k, v in fit.items()}
+    info["fit"] = None if fit is None else {k: (round(v, 3) if np.isfinite(v) else None) for k, v in fit.items()}
     if fit:
         tm = np.linspace(cv.t[ok][0] - 20, cv.t[ok][-1] + 20, 300)
         fm = fit["f0"] * straight_flyover_ratio(tm, fit["t_cpa"], fit["speed"], fit["d_cpa"])
@@ -560,6 +563,73 @@ def create_app():
                             assignments=[a.__dict__ for a in r.assignments])
             out.append(item)
         return jsonify(candidates=out)
+
+    @app.post("/api/day/area")
+    def day_area():
+        """Every place and start time that could hear all the ticked passes, then the silence filter.
+
+        Speed and distance windows come from each fit: 3 sigma + 3 % + the wind
+        allowance for the speed, max(3 sigma, 20 %) for the distance. The quiet
+        gaps are the stretches between consecutive ticked passes; a place is
+        dropped when some other aircraft came within the per-type slant
+        distance there during a gap.
+        """
+        if S.day is None:
+            raise ValueError("open the day archive first")
+        d = request.get_json()
+        curves = sorted([c for c in S.curves if c.meta.get("use", True) and c.meta.get("fit")], key=lambda c: np.nanmin(c.t))
+        if len(curves) < 2:
+            raise ValueError("fit at least two passes and tick 'use' on the ones to search with")
+        wind = float(d.get("wind", 15))
+        passes = []
+        for c in curves:
+            f = c.meta["fit"]
+            se = f.get("speed_err") or 0.0
+            de = f.get("d_cpa_err") or 0.0
+            tv = 3 * se + 0.03 * f["speed"] + wind
+            td = max(3 * de, 0.2 * f["d_cpa"])
+            passes.append(dict(t_cpa=f["t_cpa"], speed=f["speed"], d_cpa=f["d_cpa"], speed_lo=f["speed"] - tv,
+                               speed_hi=f["speed"] + tv, d_lo=max(f["d_cpa"] - td, 30.0), d_hi=f["d_cpa"] + td,
+                               name=c.name))
+        bbox = CONUS_BBOX if d.get("area", "conus") == "conus" else None
+        S.progress = {"stage": "places that hear every pass", "fraction": 0.0}
+
+        def prog_v(fr):
+            S.progress = {"stage": "places that hear every pass", "fraction": round(fr * 0.5, 3)}
+
+        rec_s = len(S.audio[0]) / S.audio[1] if S.audio else 3600.0
+        cands = S.day.search_world(passes, n_best=None, bbox=bbox, cell_km=2.0, recording_s=rec_s,
+                                   c=float(d.get("c", 340)), progress=prog_v)
+        n_all = len(cands)
+        gaps = []
+        if d.get("silence", True) and cands:
+            radius = {k: float(d.get("r_" + k, v)) * 1000 for k, v in
+                      {"prop": 3.5, "heli": 3.5, "jet": 6.0, "unknown": 4.5}.items()}
+            for a, b in zip(curves[:-1], curves[1:]):
+                w0, w1 = float(np.nanmax(a.t)) + 10, float(np.nanmin(b.t)) - 20
+                if w1 - w0 < 60:
+                    continue
+                gaps.append([w0, w1])
+                S.progress = {"stage": f"silence filter {a.name}-{b.name}", "fraction": 0.5}
+
+                def prog_s(fr):
+                    S.progress = {"stage": "silence filter", "fraction": round(0.5 + 0.5 * fr, 3)}
+
+                ok = S.day.silence_ok(cands, w0, w1, radius, cell_km=2.0, progress=prog_s)
+                cands = [c for c, o in zip(cands, ok) if o]
+        # one point per 2 km cell, with the range of start times that work there
+        cells = {}
+        for c in cands:
+            k = (round(c.lat, 3), round(c.lon, 3))
+            e = cells.setdefault(k, [c.t_start, c.t_start, 0, set()])
+            e[0], e[1], e[2] = min(e[0], c.t_start), max(e[1], c.t_start), e[2] + 1
+            e[3].update(c.aircraft)
+        pts = [{"lat": k[0], "lon": k[1], "t0": v[0], "t1": v[1], "t0_iso": _iso(v[0]), "t1_iso": _iso(v[1]), "n": v[2],
+                "aircraft": sorted(v[3])[:6]} for k, v in cells.items()]
+        pts.sort(key=lambda p: p["t0"])
+        S.progress = {"stage": "done", "fraction": 1.0}
+        return jsonify(n_all=n_all, n_quiet=len(cands), gaps=gaps, passes=passes, points=pts[:40000],
+                       truncated=len(pts) > 40000)
 
     @app.post("/api/tracks/opensky")
     def opensky():

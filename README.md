@@ -95,6 +95,10 @@ sgeo locate curves.json tracks.csv --center 45.46,9.19 --radius 25 \
 
 With a whole day loaded and two or more fitted passes, **Search worldwide** (or `DayArchive.search_world`) needs no search area. Every low aircraft sample with the right ground speed votes for the places abeam of it at about the fitted distance, and for the recording start time that would put the pass at the right moment. Places and times where different aircraft match every pass are candidates. Places with a lot of low traffic (airports) rank lower, because a mostly quiet recording can't have been made there. The best candidates are then checked with the full curve match (`refine_world`). Treat the result as a short list to inspect, not a final answer.
 
+### Places that hear the passes, and the silence filter
+
+**Find places that hear the passes** (step 4) lists every 2 km cell and start time, in the continental US or worldwide, where real flights match each ticked pass. The speed window is the fit's 3σ + 3 % + a wind allowance; the distance window is max(3σ, 20 %). The quiet stretches between consecutive ticked passes then act as a **silence filter** (`DayArchive.silence_ok`): a place is dropped when any other aircraft came within a slant distance during a gap. The distance is set per aircraft type (defaults: propeller and helicopter 3.5 km, jet 6 km, unknown 4.5 km), since a small plane is only heard from close by. Aircraft above the archive's 7 km limit never count. The survivors appear on the map as dots coloured by recording start; click one to make it the search centre.
+
 Use tracks covering a few minutes before and after the recording. The sound heard at time *t* was emitted up to a minute earlier.
 
 ## Accuracy and limits

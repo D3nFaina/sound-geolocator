@@ -96,5 +96,43 @@ def fit_flyover(t, f, c=DEFAULT_SPEED_OF_SOUND):
         if best is None or r.cost < best.cost:
             best = r
     f0_, tc, v, d = best.x
-    rms = np.sqrt(np.mean(res(best.x) ** 2))
-    return {"f0": f0_, "t_cpa": tc, "speed": v, "d_cpa": d, "rms_hz": rms}
+    r = res(best.x)
+    rms = np.sqrt(np.mean(r ** 2))
+    out = {"f0": f0_, "t_cpa": tc, "speed": v, "d_cpa": d, "rms_hz": rms}
+    out.update(_fit_errors(res, best.x, r, t))
+    return out
+
+
+def _fit_errors(res, x, r, t):
+    """1-sigma errors of (f0, t_cpa, speed, d_cpa) from the curvature of the misfit.
+
+    Covariance = s^2 (J^T J)^-1 with s^2 the residual variance, using only the
+    points the robust fit kept (|residual| < 3 rms-of-the-core). Neighbouring
+    spectrogram frames overlap and the aircraft wobbles, so residuals are
+    correlated; the errors are inflated by sqrt(n / n_eff), with n_eff from the
+    lag-1 autocorrelation of the residuals.
+    """
+    names = ("f0", "t_cpa", "speed", "d_cpa")
+    core = np.abs(r) < 3 * max(np.median(np.abs(r)) * 1.4826, 1e-6)
+    n = int(core.sum())
+    if n <= len(x) + 2:
+        return {k + "_err": float("nan") for k in names}
+    J = np.empty((len(r), len(x)))
+    for k in range(len(x)):
+        h = max(abs(x[k]) * 1e-6, 1e-4)
+        xp, xm = x.copy(), x.copy()
+        xp[k] += h
+        xm[k] -= h
+        J[:, k] = (res(xp) - res(xm)) / (2 * h)
+    J, rc = J[core], r[core]
+    s2 = float(np.sum(rc ** 2) / (n - len(x)))
+    o = np.argsort(t[core])
+    rs = rc[o]
+    rho = float(np.clip(np.corrcoef(rs[:-1], rs[1:])[0, 1], 0, 0.98)) if n > 5 else 0.0
+    inflate = (1 + rho) / (1 - rho)
+    try:
+        cov = np.linalg.inv(J.T @ J) * s2 * inflate
+        err = np.sqrt(np.clip(np.diag(cov), 0, None))
+    except np.linalg.LinAlgError:
+        err = np.full(len(x), np.nan)
+    return {k + "_err": float(e) for k, e in zip(names, err)}
