@@ -11,7 +11,9 @@
   * { box-sizing:border-box; }
   body { margin:0; font:14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:var(--bg); color:var(--text); display:grid; grid-template-columns:340px 1fr; height:100vh; }
   aside { background:var(--panel); border-right:1px solid var(--line); overflow-y:auto; padding:14px 16px 40px; }
-  main { display:grid; grid-template-rows:minmax(260px, 48%) 1fr; min-width:0; }
+  main { display:grid; grid-template-rows:55% 6px 1fr; min-width:0; min-height:0; }
+  #split { background:var(--line); cursor:row-resize; }
+  #split:hover { background:var(--accent); }
   h1 { font-size:18px; margin:0 0 4px; }
   h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:18px 0 8px; display:flex; gap:8px; align-items:center; }
   h2 .n { background:var(--accent); color:#000; border-radius:50%; width:20px; height:20px; display:inline-grid; place-items:center; font-size:12px; }
@@ -31,9 +33,12 @@
   .curves .meta { color:var(--muted); }
   .x { background:none; border:none; color:var(--muted); cursor:pointer; font-size:16px; padding:0 4px; }
   #specwrap { position:relative; border-bottom:1px solid var(--line); }
-  #spec { width:100%; height:100%; display:block; cursor:crosshair; }
-  #readout { position:absolute; right:10px; top:8px; background:#000a; padding:3px 8px; border-radius:4px; font:12px ui-monospace, monospace; pointer-events:none; }
-  #hint { position:absolute; left:70px; top:8px; color:var(--muted); font-size:12px; pointer-events:none; }
+  #specwrap { display:grid; grid-template-rows:auto 1fr; min-height:0; }
+  #toolbar { display:flex; gap:6px; align-items:center; padding:6px 8px; border-bottom:1px solid var(--line); background:var(--panel); }
+  #toolbar button { padding:4px 9px; }
+  #spec { width:100%; height:100%; display:block; cursor:crosshair; min-height:0; }
+  #readout { position:absolute; right:10px; top:46px; background:#000a; padding:3px 8px; border-radius:4px; font:12px ui-monospace, monospace; pointer-events:none; }
+  #hint { position:absolute; left:70px; top:46px; color:var(--muted); font-size:12px; pointer-events:none; }
   #map { width:100%; height:100%; }
   #status { position:fixed; bottom:12px; left:356px; background:#000c; border:1px solid var(--line); padding:8px 12px; border-radius:6px; display:none; max-width:60vw; z-index:1000; }
   #status.err { border-color:#e63946; color:#ffb3b8; }
@@ -71,7 +76,7 @@
   </div>
 
   <h2><span class="n">2</span>Doppler curves</h2>
-  <p class="sub"><b>Click</b> on a falling line to trace it. <b>Shift-drag</b> a box around a line instead when lines are tangled. Drag to pan, scroll to zoom (Ctrl: time only, Alt: frequency only), double-click to reset. Pick at least two passes.</p>
+  <p class="sub">Use <b>⬚ Zoom</b> to drag a rectangle around a pass, then <b>〰 Fit</b>: click on the line or drag a box around it. Fits are saved automatically and come back next time you open this recording. Two-finger scroll moves around, pinch or Ctrl+scroll zooms. <b>use</b> = include in the location search.</p>
   <label class="chk"><input id="allowRise" type="checkbox"> allow rising pitch (turning or climbing aircraft)</label>
   <ul id="curves" class="curves"></ul>
   <div class="row">
@@ -85,6 +90,9 @@
   <label class="btn" for="tracksFile">Open flight tracks…</label>
   <input id="tracksFile" type="file" accept=".csv,.json">
   <button id="openskyBtn" title="Recent data only (about the last hour)">Fetch from OpenSky</button>
+  <label>…or a day of ADS-B history on this computer (adsb.lol / ADS-B Exchange folder or .tar)</label>
+  <div style="display:grid;grid-template-columns:1fr auto;gap:6px"><input id="histPath" type="text" placeholder="~/Downloads/v2025.06.01-planes-readsb-prod-0.tar"><button id="histBtn">Load</button></div>
+  <p class="sub" style="margin-top:4px">Uses the search centre, radius + 20 km, and the start time ± uncertainty from step 4.</p>
   <div id="tracksInfo" class="sub" style="margin-top:6px"></div>
 
   <h2><span class="n">4</span>Search</h2>
@@ -136,7 +144,21 @@
   <div id="result"></div>
 </aside>
 <main>
-  <div id="specwrap"><canvas id="spec"></canvas><div id="readout"></div><div id="hint">Load a recording or the demo to begin</div></div>
+  <div id="specwrap">
+    <div id="toolbar">
+      <div class="seg" title="Tool (keys: Z, H, F)">
+        <button id="tZoom" class="on" title="Drag a rectangle to zoom into it (Z)">⬚ Zoom</button>
+        <button id="tPan" title="Drag to move around (H)">✋ Pan</button>
+        <button id="tFit" title="Click a line, or drag a box around it, to trace and fit it (F)">〰 Fit</button>
+      </div>
+      <button id="zBack" title="Previous view (Backspace)">↶ Back</button>
+      <button id="zReset" title="Whole recording (0)">⤢ All</button>
+      <label class="chk" style="margin:0 0 0 6px"><input id="showFits" type="checkbox" checked> show fits</label>
+      <label class="chk" style="margin:0 0 0 6px"><input id="showModel" type="checkbox" checked> model curves</label>
+    </div>
+    <canvas id="spec"></canvas><div id="readout"></div><div id="hint">Load a recording or the demo to begin</div>
+  </div>
+  <div id="split" title="Drag to resize"></div>
   <div id="map"></div>
 </main>
 <div id="status"></div>

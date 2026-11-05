@@ -240,3 +240,85 @@ def load_tracks(path: str | Path) -> list[Track]:
         return [Track(d["ident"], d["t"], d["lat"], d["lon"], d["alt"], d.get("callsign", ""), d.get("typecode", ""))
                 for d in data]
     return load_tracks_csv(path)
+
+
+# ----------------------------------------------------------------------------- readsb / tar1090 history
+
+def _open_json_maybe_gz(raw: bytes):
+    import gzip
+
+    if raw[:2] == b"\x1f\x8b":
+        raw = gzip.decompress(raw)
+    return json.loads(raw)
+
+
+def _trace_to_track(d, t_lo, t_hi, lat0, lon0, radius_m):
+    from .geo import lla_to_enu_offsets
+
+    base = float(d.get("timestamp", 0))
+    rows = []
+    for r in d.get("trace", []):
+        t = base + float(r[0])
+        if t < t_lo or t > t_hi or r[1] is None or r[2] is None:
+            continue
+        alt_geom = r[10] if len(r) > 10 else None
+        alt = alt_geom if isinstance(alt_geom, (int, float)) else r[3]
+        if not isinstance(alt, (int, float)):
+            continue  # "ground" or missing
+        rows.append((t, float(r[1]), float(r[2]), float(alt) * FT))
+    if len(rows) < 4:
+        return None
+    a = np.array(rows)
+    e, n = lla_to_enu_offsets(lat0, lon0, a[:, 1], a[:, 2])
+    if np.min(np.hypot(e, n)) > radius_m:
+        return None
+    cs = ""
+    for r in d.get("trace", []):
+        if len(r) > 8 and isinstance(r[8], dict) and r[8].get("flight"):
+            cs = r[8]["flight"].strip()
+            break
+    return Track(str(d.get("icao", "")).lower(), a[:, 0], a[:, 1], a[:, 2], a[:, 3], cs,
+                 str(d.get("t", "") or "").upper(), max_gap_s=120)
+
+
+def load_readsb_history(source, t_start, t_end, lat, lon, radius_km=40.0, progress=None) -> list[Track]:
+    """Read aircraft traces from a readsb / tar1090 "globe_history" day.
+
+    This is the format of the free daily archives from adsb.lol
+    (github.com/adsblol/globe_history_YYYY releases) and of ADS-B Exchange
+    historical data. ``source`` is the extracted folder (containing
+    ``traces/``) or the .tar file itself. Only aircraft that come within
+    ``radius_km`` of (lat, lon) between t_start and t_end (unix s) are kept.
+    Altitudes: geometric when present, else barometric (feet -> metres).
+    """
+    import tarfile
+
+    source = Path(source)
+    radius_m = radius_km * 1000
+    out = []
+    if source.is_dir():
+        files = [p for p in source.rglob("trace_full_*.json")] or [p for p in source.rglob("trace_full_*")]
+        for k, p in enumerate(files):
+            try:
+                tr = _trace_to_track(_open_json_maybe_gz(p.read_bytes()), t_start, t_end, lat, lon, radius_m)
+            except Exception:
+                continue
+            if tr is not None:
+                out.append(tr)
+            if progress and k % 2000 == 0:
+                progress(k / len(files))
+    else:
+        with tarfile.open(source, "r|*") as tf:  # streaming: works on huge archives
+            for k, m in enumerate(tf):
+                if not m.isfile() or "trace_full_" not in m.name:
+                    continue
+                try:
+                    tr = _trace_to_track(_open_json_maybe_gz(tf.extractfile(m).read()), t_start, t_end, lat, lon,
+                                         radius_m)
+                except Exception:
+                    continue
+                if tr is not None:
+                    out.append(tr)
+                if progress and k % 2000 == 0:
+                    progress(None)
+    return out

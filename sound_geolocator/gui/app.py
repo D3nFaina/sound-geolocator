@@ -80,15 +80,48 @@ S = State()
 
 
 def _curve_json(cv: DopplerCurve, i: int):
+    from ..doppler import straight_flyover_ratio
+
     ok = np.isfinite(cv.f)
     info = {"name": cv.name or f"curve{i}", "t": [round(float(v), 3) for v in cv.t[ok]],
-            "f": [round(float(v), 3) for v in cv.f[ok]], "n": int(ok.sum())}
-    try:
-        r = fit_flyover(cv.t, cv.f)
-        info["fit"] = {k: round(float(v), 2) for k, v in r.items()}
-    except Exception:
-        info["fit"] = None
+            "f": [round(float(v), 3) for v in cv.f[ok]], "n": int(ok.sum()),
+            "show": cv.meta.get("show", True), "use": cv.meta.get("use", True)}
+    fit = cv.meta.get("fit")
+    if fit is None:
+        try:
+            fit = {k: float(v) for k, v in fit_flyover(cv.t, cv.f).items()}
+        except Exception:
+            fit = None
+        cv.meta["fit"] = fit
+    info["fit"] = None if fit is None else {k: round(v, 2) for k, v in fit.items()}
+    if fit:
+        tm = np.linspace(cv.t[ok][0] - 20, cv.t[ok][-1] + 20, 300)
+        fm = fit["f0"] * straight_flyover_ratio(tm, fit["t_cpa"], fit["speed"], fit["d_cpa"])
+        info["model_t"] = [round(float(v), 2) for v in tm]
+        info["model_f"] = [round(float(v), 2) for v in fm]
     return info
+
+
+def _fits_path():
+    """Where the picked curves of the current recording are kept between sessions."""
+    d = Path.home() / ".sound_geolocator" / "fits"
+    d.mkdir(parents=True, exist_ok=True)
+    safe = "".join(c if c.isalnum() or c in "-_. " else "_" for c in (S.audio_name or "unnamed"))
+    return d / f"{safe}.json"
+
+
+def _save_fits():
+    if S.audio_name:
+        save_curves(S.curves, _fits_path())
+
+
+def _load_fits():
+    p = _fits_path()
+    S.curves = load_curves(p) if p.exists() else []
+
+
+def _curves_payload():
+    return [_curve_json(c, i) for i, c in enumerate(S.curves)]
 
 
 def _spec_json():
@@ -117,7 +150,7 @@ def create_app():
     @app.get("/api/state")
     def state():
         return jsonify(spec=_spec_json() if S.spec is not None else {"loaded": False},
-                       curves=[_curve_json(c, i) for i, c in enumerate(S.curves)],
+                       curves=_curves_payload(),
                        tracks=_tracks_json(), truth=S.truth)
 
     @app.post("/api/audio")
@@ -134,9 +167,10 @@ def create_app():
         with S.lock:
             S.audio, S.audio_name = (x, sr), f.filename
             S.params["sr"] = sr
-            S.curves, S.result, S.truth = [], None, None
+            S.result, S.truth = None, None
+            _load_fits()
             S.compute_spec()
-        return jsonify(spec=_spec_json())
+        return jsonify(spec=_spec_json(), curves=_curves_payload(), fits_file=str(_fits_path()))
 
     @app.post("/api/audio/path")
     def load_path():
@@ -151,9 +185,10 @@ def create_app():
             x, sr = load_audio(path, sr=sr)
             S.audio, S.audio_name = (x, sr), path.name
             S.params["sr"] = sr
-            S.curves, S.result, S.truth = [], None, None
+            S.result, S.truth = None, None
+            _load_fits()
             S.compute_spec()
-        return jsonify(spec=_spec_json())
+        return jsonify(spec=_spec_json(), curves=_curves_payload(), fits_file=str(_fits_path()))
 
     @app.post("/api/params")
     def params():
@@ -227,7 +262,10 @@ def create_app():
         name = d.get("name") or f"pass {len(S.curves) + 1}"
         rise = None if d.get("allow_rise") else 0.5
         if d["mode"] == "seed":
-            cv = trace_from_seed(S.spec, float(d["t"]), float(d["f"]), d.get("tmin"), d.get("tmax"),
+            t = float(d["t"])
+            tmin = max(t - 180, d["tmin"]) if d.get("tmin") is not None else t - 180
+            tmax = min(t + 180, d["tmax"]) if d.get("tmax") is not None else t + 180
+            cv = trace_from_seed(S.spec, t, float(d["f"]), tmin, tmax,
                                  max_rise_hz_s=rise, name=name)
         else:
             cv = track_ridge(S.spec, float(d["f0"]), float(d["f1"]), float(d["t0"]), float(d["t1"]),
@@ -237,13 +275,28 @@ def create_app():
             raise ValueError("no clear line found there; try clicking right on a bright line")
         with S.lock:
             S.curves.append(cv)
-        return jsonify(curves=[_curve_json(c, i) for i, c in enumerate(S.curves)])
+            _save_fits()
+        return jsonify(curves=_curves_payload())
 
     @app.delete("/api/curves/<int:i>")
     def delete_curve(i):
         with S.lock:
             S.curves.pop(i)
-        return jsonify(curves=[_curve_json(c, i) for i, c in enumerate(S.curves)])
+            _save_fits()
+        return jsonify(curves=_curves_payload())
+
+    @app.patch("/api/curves/<int:i>")
+    def edit_curve(i):
+        d = request.get_json()
+        with S.lock:
+            cv = S.curves[i]
+            if "name" in d:
+                cv.name = str(d["name"])[:40]
+            for k in ("show", "use"):
+                if k in d:
+                    cv.meta[k] = bool(d[k])
+            _save_fits()
+        return jsonify(curves=_curves_payload())
 
     @app.get("/api/curves.json")
     def export_curves():
@@ -258,7 +311,8 @@ def create_app():
             f.save(tmp.name)
             with S.lock:
                 S.curves = load_curves(tmp.name)
-        return jsonify(curves=[_curve_json(c, i) for i, c in enumerate(S.curves)])
+                _save_fits()
+        return jsonify(curves=_curves_payload())
 
     def _tracks_json():
         out = []
@@ -279,6 +333,32 @@ def create_app():
         with S.lock:
             S.tracks = tracks
         return jsonify(tracks=_tracks_json())
+
+    @app.post("/api/tracks/history")
+    def history_tracks():
+        """Load a readsb/tar1090 globe_history day (adsb.lol or ADS-B Exchange) from a local path."""
+        from ..flights import load_readsb_history, save_tracks_csv
+
+        d = request.get_json()
+        src = Path(d["path"]).expanduser()
+        if not src.exists():
+            raise ValueError(f"not found: {src}")
+        t0 = _parse_time(d["start"])
+        unc = float(d.get("uncertainty", 600))
+        dur = len(S.audio[0]) / S.audio[1] if S.audio else 3600
+        S.progress = {"stage": "reading flight history", "fraction": 0.0}
+
+        def prog(fr):
+            S.progress = {"stage": "reading flight history", "fraction": fr or S.progress["fraction"]}
+
+        tracks = load_readsb_history(src, t0 - unc - 300, t0 + unc + dur + 300, float(d["lat"]), float(d["lon"]),
+                                     float(d.get("radius", 40)), progress=prog)
+        S.progress = {"stage": "done", "fraction": 1.0}
+        with S.lock:
+            S.tracks = tracks
+        cache = Path.home() / ".sound_geolocator" / "tracks_last.csv"
+        save_tracks_csv(tracks, cache)
+        return jsonify(tracks=_tracks_json(), saved=str(cache))
 
     @app.post("/api/tracks/opensky")
     def opensky():
@@ -318,8 +398,9 @@ def create_app():
         tracks = filter_tracks(S.tracks, d.get("types") or ("prop", "jet", "heli", "unknown"))
         if not tracks:
             raise ValueError("no flights left after the aircraft-type filter")
-        use = d.get("use")
-        curves = [c for i, c in enumerate(S.curves) if use is None or i in use]
+        curves = [c for c in S.curves if c.meta.get("use", True)]
+        if not curves:
+            raise ValueError("tick 'use' on at least one curve")
         lat, lon, radius = float(d["lat"]), float(d["lon"]), float(d.get("radius", 20))
         geoid = float(d.get("geoid", 0) or 0)
         alt = float(d.get("alt", 0))
@@ -380,7 +461,7 @@ def create_app():
             S.compute_spec()
         guess = {"lat": round(truth[0] + 0.08, 4), "lon": round(truth[1] - 0.1, 4), "start": _iso(t0 + 75),
                  "uncertainty": 120, "radius": 20, "alt": truth[2]}
-        return jsonify(spec=_spec_json(), tracks=_tracks_json(), guess=guess)
+        return jsonify(spec=_spec_json(), tracks=_tracks_json(), guess=guess, curves=_curves_payload())
 
     return app
 
@@ -391,6 +472,7 @@ def main(host="127.0.0.1", port=8765, open_browser=True, preload=None):
         print(f"Loading {preload} …")
         x, sr = load_audio(preload, sr=S.params["sr"])
         S.audio, S.audio_name = (x, sr), Path(preload).name
+        _load_fits()
         S.compute_spec()
         print(f"Loaded {len(x) / sr / 60:.1f} min of audio")
     url = f"http://{host}:{port}"

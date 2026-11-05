@@ -86,7 +86,8 @@ sgeo locate curves.json tracks.csv --center 45.46,9.19 --radius 25 \
 
 * **OpenSky REST API, recent data only** (`sgeo fetch-opensky --center LAT,LON --start ... --out tracks.csv`). Set `OPENSKY_CLIENT_ID` / `OPENSKY_CLIENT_SECRET` for authenticated access.
 * **OpenSky historical database** (Trino, via `pyopensky`) for older recordings. Export state vectors to CSV.
-* **ADS-B Exchange / adsb.lol** history, or any CSV with the columns above.
+* **adsb.lol daily history** (free, ODbL): one release per day at github.com/adsblol/globe_history_YYYY. Download the day's .tar parts, join them (`cat *.tar.a* > day.tar`), and load the .tar or its extracted folder in the GUI (step 3) or with `sound_geolocator.flights.load_readsb_history`. ADS-B Exchange historical data uses the same format.
+* Any CSV with the columns above.
 
 Use tracks covering a few minutes before and after the recording. The sound heard at time *t* was emitted up to a minute earlier.
 

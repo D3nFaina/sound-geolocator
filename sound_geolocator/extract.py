@@ -162,6 +162,8 @@ def track_ridge(spec: Spectrogram, fmin: float, fmax: float, tmin: float | None 
         E[:, j] = np.interp(fine, sub.freqs, S[:, j])
     E = np.minimum(E, saturate_db)  # hard cap: every clearly visible line is worth the same
     K = max(1, int(np.ceil(max_slope_hz_s * hop / fine_df)))
+    if fine.size * T * (2 * K + 1) > 4e8:
+        raise ValueError("selection too large to trace: zoom in or draw a smaller box around one pass")
     pen = curv_penalty_db * (fine_df / hop)  # per fine-slope step
     sd = None
     if seed is not None:
