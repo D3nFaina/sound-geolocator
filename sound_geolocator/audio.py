@@ -22,7 +22,9 @@ def load_audio(path: str | Path, sr: int | None = 16000, channel: str = "mix"):
     try:
         data, rate = sf.read(str(path), always_2d=True, dtype="float32")
     except Exception:
-        data, rate = _ffmpeg_decode(path)
+        # let ffmpeg downmix and resample: a 1-hour 48 kHz stereo track would
+        # otherwise need ~700 MB of temporary WAV
+        data, rate = _ffmpeg_decode(path, sr=sr, mono=channel == "mix")
     if channel == "mix":
         x = data.mean(axis=1)
     else:
@@ -34,12 +36,17 @@ def load_audio(path: str | Path, sr: int | None = 16000, channel: str = "mix"):
     return x.astype(np.float32), int(rate)
 
 
-def _ffmpeg_decode(path: Path):
+def _ffmpeg_decode(path: Path, sr: int | None = None, mono: bool = False):
     if shutil.which("ffmpeg") is None:
         raise RuntimeError(f"Cannot read {path}: install ffmpeg to load video/compressed audio")
     with tempfile.TemporaryDirectory() as tmp:
         wav = Path(tmp) / "audio.wav"
-        cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", str(path), "-vn", "-acodec", "pcm_s16le", str(wav)]
+        cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", str(path), "-vn", "-acodec", "pcm_s16le"]
+        if mono:
+            cmd += ["-ac", "1"]
+        if sr:
+            cmd += ["-ar", str(int(sr))]
+        cmd.append(str(wav))
         subprocess.run(cmd, check=True)
         data, rate = sf.read(str(wav), always_2d=True, dtype="float32")
     return data, rate

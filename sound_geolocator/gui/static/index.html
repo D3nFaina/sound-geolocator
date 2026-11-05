@@ -57,6 +57,8 @@
   <h2><span class="n">1</span>Recording</h2>
   <label class="btn" for="audioFile">Open audio or video…</label>
   <input id="audioFile" type="file" accept="audio/*,video/*,.wav,.mp3,.m4a,.flac,.ogg,.mp4,.mov,.mkv,.webm">
+  <label>…or a file path on this computer (no upload)</label>
+  <div style="display:grid;grid-template-columns:1fr auto;gap:6px"><input id="path" type="text" placeholder="~/Downloads/clip.mp4"><button id="pathBtn">Load</button></div>
   <div id="audioName" class="sub" style="margin-top:6px"></div>
   <div class="row3">
     <div><label>min Hz</label><input id="fmin" type="number" value="20"></div>
@@ -69,7 +71,7 @@
   </div>
 
   <h2><span class="n">2</span>Doppler curves</h2>
-  <p class="sub"><b>Click</b> on a falling line to trace it. <b>Shift-drag</b> a box around a line instead when lines are tangled. Scroll to zoom, double-click to reset. Pick at least two passes.</p>
+  <p class="sub"><b>Click</b> on a falling line to trace it. <b>Shift-drag</b> a box around a line instead when lines are tangled. Drag to pan, scroll to zoom (Ctrl: time only, Alt: frequency only), double-click to reset. Pick at least two passes.</p>
   <label class="chk"><input id="allowRise" type="checkbox"> allow rising pitch (turning or climbing aircraft)</label>
   <ul id="curves" class="curves"></ul>
   <div class="row">

@@ -1,6 +1,6 @@
 const COLORS = ['#4cc9f0', '#80ed99', '#f8961e', '#f72585', '#b5179e', '#ffd166', '#90be6d', '#43aa8b'];
 const $ = (id) => document.getElementById(id);
-let spec = null, img = null, view = null, curves = [], tracks = [], viewMode = 'enhanced';
+let spec = null, img = null, imgExt = null, view = null, curves = [], tracks = [], viewMode = 'enhanced';
 
 // ---------------------------------------------------------------- helpers
 function status(msg, err = false, busy = false) {
@@ -26,25 +26,35 @@ const PAD = { l: 58, r: 12, t: 10, b: 32 };
 function plotRect() { return { x: PAD.l, y: PAD.t, w: cv.width - PAD.l - PAD.r, h: cv.height - PAD.t - PAD.b }; }
 function toTF(px, py) { const p = plotRect(); return { t: view.t0 + (px - p.x) / p.w * (view.t1 - view.t0), f: view.f1 - (py - p.y) / p.h * (view.f1 - view.f0) }; }
 function toXY(t, f) { const p = plotRect(); return { x: p.x + (t - view.t0) / (view.t1 - view.t0) * p.w, y: p.y + (view.f1 - f) / (view.f1 - view.f0) * p.h }; }
+function fmtT(t, step) {
+  if (spec && spec.t1 < 600) return +t.toFixed(2) + ' s';
+  const m = Math.floor(t / 60), sec = t - 60 * m;
+  return `${m}:${(step < 1 ? sec.toFixed(1) : Math.round(sec).toString()).padStart(step < 1 ? 4 : 2, '0')}`;
+}
+function niceTime(range, n) {
+  const r = range / n;
+  for (const k of [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600]) if (k >= r) return k;
+  return 3600;
+}
 function niceStep(range, n) { const r = range / n, m = Math.pow(10, Math.floor(Math.log10(r))); for (const k of [1, 2, 5, 10]) if (k * m >= r) return k * m; }
 
-function resize() { const r = cv.getBoundingClientRect(); cv.width = r.width * devicePixelRatio; cv.height = r.height * devicePixelRatio; ctx.setTransform(1, 0, 0, 1, 0, 0); draw(); }
+function resize() { const r = cv.getBoundingClientRect(); cv.width = r.width * devicePixelRatio; cv.height = r.height * devicePixelRatio; ctx.setTransform(1, 0, 0, 1, 0, 0); draw(); if (spec) scheduleTile(); }
 function draw(box) {
   const W = cv.width, H = cv.height, dpr = devicePixelRatio;
   ctx.fillStyle = '#0f1115'; ctx.fillRect(0, 0, W, H);
   if (!spec || !img) return;
   const p = plotRect();
-  // source rect inside the image (image row 0 = highest frequency)
-  const iw = img.naturalWidth, ih = img.naturalHeight;
-  const sx = (view.t0 - spec.t0) / (spec.t1 - spec.t0) * iw, sw = (view.t1 - view.t0) / (spec.t1 - spec.t0) * iw;
-  const sy = (spec.f1 - view.f1) / (spec.f1 - spec.f0) * ih, sh = (view.f1 - view.f0) / (spec.f1 - spec.f0) * ih;
-  ctx.imageSmoothingEnabled = sw < p.w;
-  ctx.drawImage(img, sx, sy, sw, sh, p.x, p.y, p.w, p.h);
+  // place the last rendered tile (extent imgExt) into the current view
+  ctx.save(); ctx.beginPath(); ctx.rect(p.x, p.y, p.w, p.h); ctx.clip();
+  const a = toXY(imgExt[0], imgExt[3]), b = toXY(imgExt[1], imgExt[2]);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(img, a.x, a.y, b.x - a.x, b.y - a.y);
+  ctx.restore();
   // axes
   ctx.strokeStyle = '#ffffff22'; ctx.fillStyle = '#9aa3b2'; ctx.font = `${11 * dpr}px system-ui`; ctx.lineWidth = 1;
-  const ts = niceStep(view.t1 - view.t0, 10), fs = niceStep(view.f1 - view.f0, 6);
+  const ts = niceTime(view.t1 - view.t0, 10), fs = niceStep(view.f1 - view.f0, 6);
   ctx.textAlign = 'center';
-  for (let t = Math.ceil(view.t0 / ts) * ts; t <= view.t1; t += ts) { const { x } = toXY(t, 0); ctx.beginPath(); ctx.moveTo(x, p.y); ctx.lineTo(x, p.y + p.h); ctx.stroke(); ctx.fillText(+t.toFixed(2) + ' s', x, p.y + p.h + 18 * dpr); }
+  for (let t = Math.ceil(view.t0 / ts) * ts; t <= view.t1; t += ts) { const { x } = toXY(t, 0); ctx.beginPath(); ctx.moveTo(x, p.y); ctx.lineTo(x, p.y + p.h); ctx.stroke(); ctx.fillText(fmtT(t, ts), x, p.y + p.h + 18 * dpr); }
   ctx.textAlign = 'right';
   for (let f = Math.ceil(view.f0 / fs) * fs; f <= view.f1; f += fs) { const { y } = toXY(0, f); ctx.beginPath(); ctx.moveTo(p.x, y); ctx.lineTo(p.x + p.w, y); ctx.stroke(); ctx.fillText(+f.toFixed(1) + ' Hz', p.x - 6, y + 4); }
   // curves
@@ -59,9 +69,18 @@ function draw(box) {
   if (box) { ctx.strokeStyle = '#fff'; ctx.setLineDash([5, 4]); ctx.strokeRect(box.x, box.y, box.w, box.h); ctx.setLineDash([]); }
   ctx.restore();
 }
-function loadImage() {
-  return new Promise((res) => { img = new Image(); img.onload = () => { draw(); res(); }; img.src = `/api/spectrogram.png?view=${viewMode}&v=${Date.now()}`; });
+let tileReq = 0, tileTimer = null;
+async function loadImage() {
+  const p = plotRect(), id = ++tileReq;
+  const q = new URLSearchParams({ view: viewMode, t0: view.t0, t1: view.t1, f0: view.f0, f1: view.f1, w: Math.round(p.w), h: Math.round(p.h), v: Date.now() });
+  const r = await fetch(`/api/spectrogram.png?${q}`);
+  if (!r.ok) return;
+  const ext = r.headers.get('X-Extent').split(',').map(Number);
+  const bmp = await createImageBitmap(await r.blob());
+  if (id !== tileReq) return; // a newer view was requested meanwhile
+  img = bmp; imgExt = ext; draw();
 }
+function scheduleTile() { clearTimeout(tileTimer); tileTimer = setTimeout(loadImage, 120); }
 async function setSpec(s) {
   spec = s; view = { t0: s.t0, t1: s.t1, f0: s.f0, f1: s.f1 };
   $('audioName').textContent = `${s.name} · ${s.duration.toFixed(1)} s`;
@@ -75,14 +94,14 @@ cv.addEventListener('mousedown', (e) => { if (!spec) return; const r = cv.getBou
 window.addEventListener('mousemove', (e) => {
   if (!spec) return;
   const r = cv.getBoundingClientRect(); const x = (e.clientX - r.left) * devicePixelRatio, y = (e.clientY - r.top) * devicePixelRatio;
-  if (e.target === cv) { const { t, f } = toTF(x, y); $('readout').textContent = `${t.toFixed(2)} s · ${f.toFixed(1)} Hz`; }
+  if (e.target === cv) { const { t, f } = toTF(x, y); $('readout').textContent = `${t.toFixed(2)} s (${fmtT(t, 0.1)}) · ${f.toFixed(1)} Hz`; }
   if (!drag) return;
   if (Math.abs(x - drag.x0) + Math.abs(y - drag.y0) > 6) drag.moved = true;
   if (!drag.moved) return;
   if (drag.shift) { draw({ x: Math.min(x, drag.x0), y: Math.min(y, drag.y0), w: Math.abs(x - drag.x0), h: Math.abs(y - drag.y0) }); }
   else { // pan
     const p = plotRect(); const dt = (x - drag.x0) / p.w * (drag.v0.t1 - drag.v0.t0), df = (y - drag.y0) / p.h * (drag.v0.f1 - drag.v0.f0);
-    view = { t0: drag.v0.t0 - dt, t1: drag.v0.t1 - dt, f0: drag.v0.f0 + df, f1: drag.v0.f1 + df }; clampView(); draw();
+    view = { t0: drag.v0.t0 - dt, t1: drag.v0.t1 - dt, f0: drag.v0.f0 + df, f1: drag.v0.f1 + df }; clampView(); draw(); scheduleTile();
   }
 });
 window.addEventListener('mouseup', async (e) => {
@@ -112,9 +131,9 @@ cv.addEventListener('wheel', (e) => {
   const onlyF = e.altKey, onlyT = e.ctrlKey || e.metaKey;
   if (!onlyF) { view.t0 = t - (t - view.t0) * k; view.t1 = t + (view.t1 - t) * k; }
   if (!onlyT) { view.f0 = f - (f - view.f0) * k; view.f1 = f + (view.f1 - f) * k; }
-  clampView(); draw();
+  clampView(); draw(); scheduleTile();
 }, { passive: false });
-cv.addEventListener('dblclick', () => { if (spec) { view = { t0: spec.t0, t1: spec.t1, f0: spec.f0, f1: spec.f1 }; draw(); } });
+cv.addEventListener('dblclick', () => { if (spec) { view = { t0: spec.t0, t1: spec.t1, f0: spec.f0, f1: spec.f1 }; draw(); scheduleTile(); } });
 new ResizeObserver(resize).observe($('specwrap'));
 
 // ---------------------------------------------------------------- curves list
@@ -158,15 +177,27 @@ function setTracks(ts, fit = true) {
 }
 
 // ---------------------------------------------------------------- actions
+function pollProgress(label) {
+  const t = setInterval(async () => {
+    try { const p = await api('/api/progress'); if (p.stage !== 'done' && p.stage !== 'idle') status(`${label}: ${p.stage} ${Math.round(p.fraction * 100)}%`, false, true); } catch (e) { }
+  }, 700);
+  return () => clearInterval(t);
+}
 $('audioFile').onchange = async (e) => {
   const f = e.target.files[0]; if (!f) return;
-  status(`Loading ${f.name}…`, false, true);
-  try { const j = await upload('/api/audio', f); setCurves([]); await setSpec(j.spec); status('Recording loaded'); } catch (err) { status(err.message, true); }
+  status(`Loading ${f.name}…`, false, true); const stop = pollProgress(f.name);
+  try { const j = await upload('/api/audio', f); stop(); setCurves([]); await setSpec(j.spec); status('Recording loaded'); } catch (err) { stop(); status(err.message, true); }
   e.target.value = '';
+};
+$('pathBtn').onclick = async () => {
+  const path = $('path').value.trim().replace(/\\ /g, ' '); if (!path) return;
+  status(`Loading ${path}…`, false, true); const stop = pollProgress('Loading');
+  try { const j = await post('/api/audio/path', { path }); stop(); setCurves([]); await setSpec(j.spec); status('Recording loaded'); } catch (err) { stop(); status(err.message, true); }
 };
 $('reSpec').onclick = async () => {
   status('Recomputing spectrogram…', false, true);
-  try { const j = await post('/api/params', { fmin: +$('fmin').value, fmax: +$('fmax').value, window: +$('win').value, hop: Math.min(0.25, +$('win').value / 4) }); await setSpec(j.spec); status('Updated'); } catch (err) { status(err.message, true); }
+  const stop = pollProgress('Recomputing');
+  try { const j = await post('/api/params', { fmin: +$('fmin').value, fmax: +$('fmax').value, window: +$('win').value, hop: Math.min(0.25, +$('win').value / 4) }); stop(); const keep = view; await setSpec(j.spec); if (keep) { view = keep; clampView(); loadImage(); } status('Updated'); } catch (err) { stop(); status(err.message, true); }
 };
 $('vEnh').onclick = () => { viewMode = 'enhanced'; $('vEnh').classList.add('on'); $('vRaw').classList.remove('on'); if (spec) loadImage(); };
 $('vRaw').onclick = () => { viewMode = 'raw'; $('vRaw').classList.add('on'); $('vEnh').classList.remove('on'); if (spec) loadImage(); };

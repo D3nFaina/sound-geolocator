@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from scipy.ndimage import median_filter, uniform_filter1d
-from scipy.signal import butter, sosfiltfilt, stft
+from scipy.signal import butter, sosfiltfilt
 
 
 @dataclass
@@ -35,21 +35,42 @@ class Spectrogram:
 
 
 def compute_spectrogram(x: np.ndarray, sr: int, window_s: float = 1.0, hop_s: float = 0.25,
-                        fmin: float = 20.0, fmax: float | None = None) -> Spectrogram:
-    """STFT power in dB. Long windows give the fine frequency resolution
-    needed to see sub-percent Doppler shifts (1 s window -> 1 Hz bins)."""
+                        fmin: float = 20.0, fmax: float | None = None, chunk_s: float = 300.0,
+                        progress=None) -> Spectrogram:
+    """STFT power in dB (float32). Long windows give the fine frequency resolution
+    needed to see sub-percent Doppler shifts (1 s window -> 1 Hz bins).
+
+    Long recordings are processed in chunks of ``chunk_s`` seconds and only
+    the fmin..fmax band is kept, so an hour of audio fits in memory.
+    ``progress(fraction)`` is called after each chunk.
+    """
+    from scipy.signal import get_window
+
     nper = int(round(window_s * sr))
     hop = max(1, int(round(hop_s * sr)))
     nfft = int(2 ** np.ceil(np.log2(nper)))
+    x = np.asarray(x, dtype=np.float32)
     if fmin > 0:
         sos = butter(4, fmin, btype="highpass", fs=sr, output="sos")
-        x = sosfiltfilt(sos, x)
-    f, t, z = stft(x, fs=sr, window="hann", nperseg=nper, noverlap=nper - hop, nfft=nfft,
-                   boundary=None, padded=False)
-    p = 10 * np.log10(np.abs(z) ** 2 + 1e-20)
-    fmax = fmax or sr / 2
-    m = (f >= fmin) & (f <= fmax)
-    return Spectrogram(t, f[m], p[m])
+        x = sosfiltfilt(sos, x).astype(np.float32)
+    fmax = min(fmax or sr / 2, sr / 2)
+    f = np.fft.rfftfreq(nfft, 1 / sr)
+    band = (f >= fmin) & (f <= fmax)
+    win = get_window("hann", nper).astype(np.float32)
+    scale = 1.0 / np.sum(win) ** 2
+    n_frames = 1 + max(0, (len(x) - nper) // hop)
+    out = np.empty((band.sum(), n_frames), dtype=np.float32)
+    per_chunk = max(1, int(chunk_s * sr) // hop)
+    for j0 in range(0, n_frames, per_chunk):
+        j1 = min(n_frames, j0 + per_chunk)
+        idx = (np.arange(j0, j1) * hop)[:, None] + np.arange(nper)[None, :]
+        frames = x[idx] * win
+        spec = np.fft.rfft(frames, n=nfft, axis=1)[:, band]
+        out[:, j0:j1] = (10 * np.log10(np.abs(spec) ** 2 * scale + 1e-20)).T
+        if progress:
+            progress(j1 / n_frames)
+    t = (np.arange(n_frames) * hop + nper / 2) / sr
+    return Spectrogram(t, f[band], out)
 
 
 def enhance(spec: Spectrogram, hum_window_s: float | None = None, whiten_hz: float = 40.0,

@@ -51,13 +51,29 @@ class State:
         self.tracks: list[Track] = []
         self.result = None
         self.truth = None  # demo only
+        self.clim = {}
+        self.progress = {"stage": "idle", "fraction": 0.0}
+        self.dem_file = None
 
     def compute_spec(self):
         p = self.params
         x, sr = self.audio
         fmax = min(p["fmax"], sr / 2)
-        self.raw = compute_spectrogram(x, sr, window_s=p["window"], hop_s=p["hop"], fmin=p["fmin"], fmax=fmax)
+        self.progress = {"stage": "spectrogram", "fraction": 0.0}
+
+        def prog(fr):
+            self.progress = {"stage": "spectrogram", "fraction": round(fr * 0.6, 3)}
+
+        self.raw = compute_spectrogram(x, sr, window_s=p["window"], hop_s=p["hop"], fmin=p["fmin"], fmax=fmax,
+                                       progress=prog)
+        self.progress = {"stage": "enhancing", "fraction": 0.65}
         self.spec = enhance(self.raw)
+        # colour limits from the whole recording, so the view doesn't flicker when panning
+        self.clim = {}
+        for k, sp in (("enhanced", self.spec), ("raw", self.raw)):
+            sub = sp.power_db[:, ::max(1, sp.power_db.shape[1] // 2000)]
+            self.clim[k] = (float(np.percentile(sub, 5)), float(np.percentile(sub, 99.7)))
+        self.progress = {"stage": "done", "fraction": 1.0}
 
 
 S = State()
@@ -112,10 +128,28 @@ def create_app():
             f.save(tmp.name)
             path = tmp.name
         sr = int(request.form.get("sr", S.params["sr"]))
+        S.progress = {"stage": "decoding audio", "fraction": 0.0}
         x, sr = load_audio(path, sr=sr)
         Path(path).unlink(missing_ok=True)
         with S.lock:
             S.audio, S.audio_name = (x, sr), f.filename
+            S.params["sr"] = sr
+            S.curves, S.result, S.truth = [], None, None
+            S.compute_spec()
+        return jsonify(spec=_spec_json())
+
+    @app.post("/api/audio/path")
+    def load_path():
+        """Load a file that is already on this computer (avoids uploading a big video)."""
+        d = request.get_json()
+        path = Path(d["path"]).expanduser()
+        if not path.exists():
+            raise ValueError(f"file not found: {path}")
+        sr = int(d.get("sr", S.params["sr"]))
+        with S.lock:
+            S.progress = {"stage": "decoding audio", "fraction": 0.0}
+            x, sr = load_audio(path, sr=sr)
+            S.audio, S.audio_name = (x, sr), path.name
             S.params["sr"] = sr
             S.curves, S.result, S.truth = [], None, None
             S.compute_spec()
@@ -135,6 +169,11 @@ def create_app():
 
     @app.get("/api/spectrogram.png")
     def spectrogram_png():
+        """Render the visible region (t0..t1, f0..f1) at about w x h pixels.
+
+        Time is max-pooled when there are more frames than pixels, so thin
+        lines stay visible in the hour-long overview.
+        """
         import matplotlib
 
         matplotlib.use("Agg")
@@ -142,13 +181,43 @@ def create_app():
 
         which = request.args.get("view", "enhanced")
         sp = S.spec if which == "enhanced" else S.raw
-        p = sp.power_db
-        lo, hi = np.percentile(p, 5), np.percentile(p, 99.7)
+        a = request.args
+        t0, t1 = float(a.get("t0", sp.times[0])), float(a.get("t1", sp.times[-1]))
+        f0, f1 = float(a.get("f0", sp.freqs[0])), float(a.get("f1", sp.freqs[-1]))
+        w, h = int(a.get("w", 2000)), int(a.get("h", 800))
+        ti = np.searchsorted(sp.times, [t0, t1])
+        fi = np.searchsorted(sp.freqs, [f0, f1])
+        p = sp.power_db[max(0, fi[0] - 1):fi[1] + 1, max(0, ti[0] - 1):ti[1] + 1]
+        if p.size == 0:
+            p = np.zeros((2, 2), np.float32)
+        kt = max(1, p.shape[1] // max(w, 1))
+        kf = max(1, p.shape[0] // max(h, 1))
+        if kt > 1 or kf > 1:
+            T, F = p.shape[1] // kt * kt, p.shape[0] // kf * kf
+            p = p[:F, :T].reshape(F // kf, kf, T // kt, kt).max(axis=(1, 3))
+        lo, hi = S.clim.get(which, (np.percentile(p, 5), np.percentile(p, 99.7)))
+        if kt * kf > 2:
+            # max-pooling lifts the noise floor; rescale so lines still stand out
+            lo, hi = float(np.percentile(p, 60)), max(float(np.percentile(p, 99.9)), hi)
         img = np.clip((p - lo) / max(hi - lo, 1e-9), 0, 1)[::-1]
         buf = io.BytesIO()
         plt.imsave(buf, img, cmap="magma", format="png")
         buf.seek(0)
-        return send_file(buf, mimetype="image/png", max_age=0)
+        # exact extent of the returned pixels (edges of the first/last bins)
+        ts, fs = sp.times, sp.freqs
+        dt = float(ts[1] - ts[0]) if len(ts) > 1 else 1.0
+        df = float(fs[1] - fs[0]) if len(fs) > 1 else 1.0
+        j0, i0 = max(0, ti[0] - 1), max(0, fi[0] - 1)
+        T, F = p.shape[1] * kt, p.shape[0] * kf
+        ext = [ts[j0] - dt / 2, ts[j0] + (T - 0.5) * dt, fs[i0] - df / 2, fs[i0] + (F - 0.5) * df]
+        resp = send_file(buf, mimetype="image/png", max_age=0)
+        resp.headers["X-Extent"] = ",".join(f"{v:.4f}" for v in ext)
+        resp.headers["Access-Control-Expose-Headers"] = "X-Extent"
+        return resp
+
+    @app.get("/api/progress")
+    def progress():
+        return jsonify(S.progress)
 
     @app.post("/api/curves")
     def add_curve():
@@ -316,8 +385,14 @@ def create_app():
     return app
 
 
-def main(host="127.0.0.1", port=8765, open_browser=True):
+def main(host="127.0.0.1", port=8765, open_browser=True, preload=None):
     app = create_app()
+    if preload:
+        print(f"Loading {preload} …")
+        x, sr = load_audio(preload, sr=S.params["sr"])
+        S.audio, S.audio_name = (x, sr), Path(preload).name
+        S.compute_spec()
+        print(f"Loaded {len(x) / sr / 60:.1f} min of audio")
     url = f"http://{host}:{port}"
     print(f"Sound Geolocator GUI on {url}  (Ctrl+C to stop)")
     if open_browser:

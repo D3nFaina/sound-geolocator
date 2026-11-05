@@ -184,7 +184,7 @@ def cmd_demo(args):
 def cmd_gui(args):
     from .gui.app import main as gui_main
 
-    gui_main(args.host, args.port, not args.no_browser)
+    gui_main(args.host, args.port, not args.no_browser, args.input)
 
 
 def main(argv=None):
@@ -252,6 +252,7 @@ def main(argv=None):
     p.set_defaults(func=cmd_demo)
 
     p = sub.add_parser("gui", help="open the point-and-click web interface")
+    p.add_argument("input", nargs="?", help="audio or video file to open straight away")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--no-browser", action="store_true")
