@@ -1,0 +1,49 @@
+"""Load audio from any audio or video file (via ffmpeg when needed)."""
+
+from __future__ import annotations
+
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+
+import numpy as np
+import soundfile as sf
+from scipy.signal import resample_poly
+
+
+def load_audio(path: str | Path, sr: int | None = 16000, channel: str = "mix"):
+    """Return (samples float32 mono, sample_rate).
+
+    Files soundfile cannot read directly (mp4, mkv, mov, m4a, webm, ...) are
+    decoded with ffmpeg. ``sr=None`` keeps the native rate.
+    """
+    path = Path(path)
+    try:
+        data, rate = sf.read(str(path), always_2d=True, dtype="float32")
+    except Exception:
+        data, rate = _ffmpeg_decode(path)
+    if channel == "mix":
+        x = data.mean(axis=1)
+    else:
+        x = data[:, int(channel)]
+    if sr is not None and sr != rate:
+        g = np.gcd(int(sr), int(rate))
+        x = resample_poly(x, sr // g, rate // g).astype(np.float32)
+        rate = sr
+    return x.astype(np.float32), int(rate)
+
+
+def _ffmpeg_decode(path: Path):
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError(f"Cannot read {path}: install ffmpeg to load video/compressed audio")
+    with tempfile.TemporaryDirectory() as tmp:
+        wav = Path(tmp) / "audio.wav"
+        cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", str(path), "-vn", "-acodec", "pcm_s16le", str(wav)]
+        subprocess.run(cmd, check=True)
+        data, rate = sf.read(str(wav), always_2d=True, dtype="float32")
+    return data, rate
+
+
+def save_audio(path: str | Path, x: np.ndarray, sr: int):
+    sf.write(str(path), np.asarray(x, dtype=np.float32), sr)

@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sound-geolocator"
+version = "0.1.0"
+description = "Estimate where a recording was made from the Doppler curves of aircraft overhead"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = ["numpy>=1.24", "scipy>=1.10", "soundfile>=0.12", "matplotlib>=3.7", "requests>=2.28"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+sgeo = "sound_geolocator.cli:main"
+
+[tool.setuptools]
+packages = ["sound_geolocator"]
