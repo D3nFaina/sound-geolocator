@@ -5,21 +5,36 @@ Estimate where (and when) a recording was made from the sound of aircraft passin
 Planes are almost always within earshot, and every one of them broadcasts its position over ADS-B. When a plane passes, the pitch of its engine tones slides down: the Doppler effect. The shape of that slide depends on where the listener stands relative to the flight path. One pass narrows the listener down to a curve on the map. Two or more passes in the same recording share one clock, so the delay between them is known, and together they pin down a single point.
 
 ```
-audio/video ──► spectrogram ──► enhance ──► pick Doppler curves ──┐
-                                                                  ├──► grid search (position × start time) ──► location
-ADS-B tracks (OpenSky / CSV) ──► simulate Doppler at each candidate position ──┘
+audio/video ─► spectrogram ─► line removal ─► isolate + fit each pass (speed, distance, closest-approach time)
+                                                             │
+whole-day ADS-B archive ─► region ─► anchored search: listener abeam of every matching aircraft, passes joined on place + start time
+                                                             │
+                                  silence filter (no other aircraft close during quiet gaps)
+                                                             │
+                     simulate the real aircraft's Doppler (retarded time) and fit every pass ─► ranked places
+                                                             │
+                                         fine misfit grid around the best places, on a map
 ```
+
+## Credit
+
+The idea and the method come from **colsto**'s video [*This background sound leaks your exact location*](https://www.youtube.com/watch?v=UytYrhYLOKI). It shows that the Doppler curves of aircraft heard in a recording, matched against public ADS-B flight tracks, can place the recording on the map. This project is an open-source software implementation of that idea, built to make the steps repeatable. All credit for the concept goes to the video and its creator.
+
+The full method, with every equation and default, is in **[docs/method.md](docs/method.md)**.
 
 ## How it works
 
 1. **Load audio** from any audio or video file (ffmpeg decodes video).
 2. **Spectrogram** with a long window (1 s → 1 Hz bins), since Doppler shifts of a few percent on a 100 Hz tone are only a few Hz.
-3. **Enhance**: remove stationary hum (per-frequency median over time), whiten broadband noise like wind and traffic (running median across frequency), and despeckle. Tonal aircraft lines (fan / propeller blade-passing tones and harmonics) remain.
-4. **Pick curves**: click one point on a line (`--seed T,F`) or draw a box around it (`--box T0,T1,F0,F1`). A Viterbi ridge tracker follows the line. It penalises changes of slope rather than slope itself, so it handles steep sweeps and carries straight through places where other lines cross. Line strength is capped so a brighter crossing line is no reason to jump. By default the pitch may only fall, as it does in a single pass.
-5. **Simulate**: for a candidate listener position, solve the retarded-time equation `t − τ = |P(τ) − O| / c` along each flight's smoothed ADS-B track, and compute the received/emitted frequency ratio `c / (c − v·n)`.
-6. **Search**: on a grid of positions, slide all curves together along time (one shared unknown start time) against every candidate flight, fitting the unknown source tone frequency in closed form. Each curve takes its best-matching flight. The position and start time with the lowest total misfit win. The best few separated spots on the coarse grid are each refined, and the lowest cost wins.
+3. **Enhance and remove lines.** Each frequency has its median removed (over the whole recording, or over a sliding 30 s window, which also removes whines and engines that idle for minutes), broadband noise is whitened, and speckle is filtered. Doppler sweeps cross each bin quickly and survive.
+4. **Isolate and fit each pass** from a couple of clicks: the smoothest falling ridge is traced between the clicks (Viterbi on bin and slope), the straight-flyover model is fitted to it, and the ridge is traced again in narrowing bands around the model curve. The fit gives the tone f₀, the closest-approach time, the aircraft's speed and the slant distance, with error bars.
+5. **Flight data.** A whole day of worldwide ADS-B (adsb.lol) is converted once into a compact archive (70 k aircraft, 45 M points below 7 km), or tracks come from a CSV or OpenSky.
+6. **Anchored search.** For every aircraft at the anchor pass's fitted speed, at every second, the listener is placed abeam of it at the fitted distance, which also fixes the recording start. The other passes are placed the same way, and only places and start times where every pass is matched by a different aircraft are kept. The passes share one clock, so the delay between them is a hard constraint.
+7. **Silence filter.** A place is dropped if any other aircraft flew within earshot (per aircraft type) during the quiet stretches between the passes.
+8. **Simulate and rank.** The real tracks of the matched aircraft are simulated with retarded-time Doppler (reported GNSS velocity) and fitted to all passes at once, adjusting listener position, height above terrain and start time. Candidates are ranked by rms misfit in Hz.
+9. **Fine grid.** Around the best places, misfit maps per pass and combined, at metre resolution, over satellite imagery.
 
-The search follows the method described in colsto's video "This background sound leaks your exact location":
+The original grid search (`sgeo locate`) follows the method described in colsto's video "This background sound leaks your exact location":
 
 * **Locked multi-event scoring.** The passes share one clock, so the physical delay between them stays fixed. Each pass may still slide by a small timing slack (`--cpa-slack`, default 2 s) to absorb error in measuring its closest-approach time, and its tone frequency is fitted freely.
 * **Speed and distance gate.** A straight-flyover fit of each curve gives the aircraft's speed and closest slant distance. A curve is only matched to flights with a similar ground speed, and only at spots where that flight's closest approach is consistent with the fitted distance.
@@ -47,6 +62,10 @@ Open a recording and zoom into a pass. With **✎ Trace**, click a few points ro
 4. points more than 3 robust σ off the model are dropped and the final fit, with error bars, is made.
 
 Check that the green model sits on the line; remove strays with **⌫ Erase** and **Fit** again if needed. With isolate + fit off, the old method is used (strongest bin in a ± Hz band around your clicks, then **Fit**). **⧉ New window** opens the current view (or one pass) in its own window, and all windows stay in sync. **∑ Model** explains the equations.
+
+![isolating a pass](docs/isolate_before_after.png)
+
+*Same rough clicks (blue +) on a noisy real recording: the old corridor tracing (left) jumps onto steady lines; the line-removed spectrogram (middle); isolation + fit (right) follows the pass and reproduces a careful hand digitisation within its error bars.*
 
 Then load flights (a whole-day archive, see below, or a CSV), click the map to set the search centre and press **Find location**, or press **Search worldwide** to search the whole day without assuming a place. Flight tracks can be switched on and off per aircraft type in the map's layer box. The demo button loads a synthetic case with a known answer. Everything runs locally, and the map tiles are the only thing loaded from the internet.
 
@@ -129,15 +148,18 @@ Use tracks covering a few minutes before and after the recording. The sound hear
 | module | what it does |
 |---|---|
 | `audio.py` | load audio/video, resample |
-| `spectrogram.py` | STFT, hum removal, whitening, despeckling |
+| `spectrogram.py` | STFT, hum and line removal (whole-recording or sliding median), whitening, despeckling |
 | `extract.py` | isolating and fitting a pass from a few clicks (`isolate_curve`), digitising along a guide, ridge tracking (box or seed), curve cleaning, JSON I/O |
-| `doppler.py` | retarded-time Doppler simulation, straight-flyover fit |
+| `doppler.py` | retarded-time Doppler simulation, straight-flyover fit with error bars |
 | `flights.py` | track model (smoothing spline in ECEF), CSV/OpenSky/readsb loaders |
-| `adsb_day.py` | whole-day worldwide archive: conversion, area queries, worldwide search |
-| `locate.py` | position × start-time search: locked multi-event scoring, gates, silence check |
+| `adsb_day.py` | whole-day worldwide archive: conversion, area queries, silence filter, worldwide voting search |
+| `anchor.py` | anchored search: listener abeam of every matching aircraft, joined across passes on place and start time |
+| `rank.py` | simulate the matched aircraft and fit all passes (batched Levenberg–Marquardt), joint and locked ranking, fine misfit grids |
+| `regions.py` | worldwide / continent / country search boxes |
+| `locate.py` | local position × start-time grid search: locked multi-event scoring, gates, silence check |
 | `aircraft_types.py` | ICAO type code → propeller / jet / helicopter |
-| `elevation.py` | DEM from OpenTopoData, GeoTIFF or .npz |
-| `gui/` | local web interface (`sgeo gui`) |
+| `elevation.py` | terrain: terrarium tiles (cached), OpenTopoData, GeoTIFF or .npz |
+| `gui/` | local web interface (`sgeo gui`, `run_gui.py`) |
 | `synth.py` | synthetic flights and recordings for tests and demo |
 | `cli.py` | `sgeo` command |
 
